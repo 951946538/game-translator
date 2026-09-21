@@ -72,6 +72,18 @@ class RegionMonitor:
             self._last_input = time.time()
             self._input_pending = True
 
+    def capture_now(self):
+        """手动触发：立即截取一帧并识别翻译（F6）。
+        独立创建 mss 实例保证线程安全。"""
+        try:
+            with _MSS() as sct:
+                shot = sct.grab(self.region)
+            frame = np.asarray(shot)[:, :, :3]
+            logging.info("手动触发识别 (F6)")
+            self._emit_frame(frame)
+        except Exception:
+            logging.error("手动触发失败:\n%s", traceback.format_exc())
+
     # ---------- 内部逻辑 ----------
 
     def _loop(self):

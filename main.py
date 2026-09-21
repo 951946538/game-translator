@@ -47,7 +47,7 @@ from app.ocr_engine import OCREngine
 from app.translator import Translator
 from app.overlay import OverlayWindow
 from app.region_select import select_region
-from app.hotkeys import HotkeyManager, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_LWIN, VK_RWIN
+from app.hotkeys import HotkeyManager, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_LWIN, VK_RWIN
 from app.textblock import group_lines
 
 
@@ -72,6 +72,7 @@ class App:
         self._last_positioned_key = None  # 覆盖模式去重（与上一帧相同的文本集合不重复翻译）
         self._region_offset = (0, 0)      # 监控区域屏幕偏移（start_monitor 时更新）
         self._game_hwnd = None            # F7 捕获的游戏窗口句柄（Win 键智能屏蔽用）
+        self._positioned_history = []     # 覆盖层译文累积（跨帧保留未变化区域的旧译文）
 
         # 队列：监控线程 -> OCR 线程 -> 翻译线程 -> UI 主线程（流水线并发）
         self.ocr_queue = queue.Queue()
@@ -83,6 +84,7 @@ class App:
         self.root = tk.Tk()
         self.root.title("游戏实时翻译")
         self.root.geometry("440x440")
+        self.root.attributes("-topmost", True)  # 控制面板永久置顶，方便实时操作
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.overlay_mode = self.config.get("overlay_mode", default="inplace")
@@ -143,7 +145,12 @@ class App:
 
         btns = tk.Frame(self.root)
         btns.pack(pady=8)
-        tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=0, padx=3)
+        self.trigger_btn = tk.Button(
+            btns, text="立即翻译 (F6)", command=self.trigger_now_async,
+            bg="#2d6a4f", fg="white", activebackground="#40916c",
+        )
+        self.trigger_btn.grid(row=0, column=0, padx=3)
+        tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=1, padx=3)
         tk.Button(btns, text="框选区域 (F8)", command=lambda: self.select_region_async()).grid(row=0, column=1, padx=3)
         self.pause_btn = tk.Button(btns, text="暂停 (F9)", command=self.toggle_pause)
         self.pause_btn.grid(row=0, column=2, padx=3)
@@ -242,6 +249,11 @@ class App:
                 logging.error("OCR 处理失败:\n%s", traceback.format_exc())
                 self.ui_queue.put(("status", f"处理失败: {e}"))
 
+    @staticmethod
+    def _boxes_overlap(a, b):
+        """两个 box [x1,y1,x2,y2] 是否有重叠"""
+        return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
     def _translate_worker(self):
         """翻译线程：与 OCR 并行（OCR 占 CPU、翻译走网络，互不抢占）"""
         while True:
@@ -271,8 +283,17 @@ class App:
                         for it, t in zip(payload, translated) if t
                     ]
                     if positioned:
-                        logging.info("翻译完成：%d 行", len(positioned))
-                        self.ui_queue.put(("positioned", positioned))
+                        # 跨帧累积：新块覆盖与之重叠的旧块，其余旧译文保留
+                        # （对话更新时只刷新对话区，侧边栏/按钮的旧译文不消失）
+                        kept = [
+                            old for old in self._positioned_history
+                            if not any(self._boxes_overlap(old["box"], n["box"]) for n in positioned)
+                        ]
+                        self._positioned_history = kept + positioned
+                        if len(self._positioned_history) > 30:
+                            self._positioned_history = self._positioned_history[-30:]
+                        logging.info("翻译完成：%d 块（累计 %d 块）", len(positioned), len(self._positioned_history))
+                        self.ui_queue.put(("positioned", list(self._positioned_history)))
                 else:
                     translated = self.translator.translate(payload)
                     if translated is not None:
@@ -323,6 +344,11 @@ class App:
     def set_fullscreen_async(self):
         self.root.after(0, self.do_capture_foreground)
 
+    def trigger_now_async(self):
+        # 手动翻译不依赖 UI 线程，直接在热键线程执行
+        if self.monitor:
+            self.monitor.capture_now()
+
     def _get_foreground_rect(self):
         """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。
         无法获取或目标是自己时返回 None"""
@@ -367,6 +393,7 @@ class App:
         # 本工具进程是 DPI Aware 的，GetClientRect/ClientToScreen 返回物理像素
         self.config.region = region
         self.status_var.set(f"监控中 · 游戏窗口 {region}")
+        self._positioned_history = []  # 换了监控区域，清空旧译文
         self.start_monitor()
         if self.overlay_mode != "inplace":
             self._do_toggle_overlay_mode()
@@ -443,6 +470,7 @@ class App:
         self.overlay.update_status(self.translator.backend, self.paused)
         self._refresh_mode_btn()
         self._last_positioned_key = None  # 切换后强制重新翻译一次
+        self._positioned_history = []
 
     # ---------- 生命周期 ----------
 
@@ -465,6 +493,7 @@ class App:
         self.overlay.update_status(self.translator.backend, self.paused)
 
         hotkey_bindings = {
+            VK_F6: self.trigger_now_async,
             VK_F7: self.set_fullscreen_async,
             VK_F8: self.select_region_async,
             VK_F9: self.toggle_pause,
