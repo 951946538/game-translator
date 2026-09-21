@@ -355,10 +355,6 @@ class App:
         self.stop_monitor()
         self.ocr_queue.put(None)
         self.translate_queue.put(None)
-        try:
-            self._mouse_listener.stop()
-        except Exception:
-            pass
         self.config.save()
         self.root.destroy()
 
@@ -378,20 +374,7 @@ class App:
         )
         hotkeys.start()
 
-        # 全局鼠标监听：点击/滚轮作为翻译触发信号（输入触发模式）
-        from pynput import mouse
-        self._mouse_listener = mouse.Listener(
-            on_click=lambda *args: self._notify_input(),
-            on_scroll=lambda *args: self._notify_input(),
-        )
-        self._mouse_listener.start()
-
         self.root.mainloop()
-
-    def _notify_input(self):
-        """点击/滚轮回调：通知监控线程有输入活动"""
-        if self.monitor and not self.paused:
-            self.monitor.notify_input()
 
 
 if __name__ == "__main__":

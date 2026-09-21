@@ -80,13 +80,61 @@ class RegionMonitor:
 
     def _input_loop(self, sct):
         """
-        输入触发模式：点击/滚轮停止 input_idle_ms（默认3秒）后识别一次。
+        输入触发模式：点击/滚轮/键盘停止 input_idle_ms（默认3秒）后识别一次。
         画面与上次识别相比没有变化则跳过。
-        适合游戏场景：内容变化几乎都由操作触发，无需持续截屏。
+
+        实现说明：不使用系统级鼠标钩子（pynput listener 是低级钩子，
+        每个鼠标移动事件都要过 Python，游戏鼠标 1000Hz 轮询率会拖慢全系统鼠标）。
+        改用零开销轮询：
+        - GetAsyncKeyState 检测鼠标按键按下
+        - GetLastInputInfo 时间戳变化 + 光标位置未变 => 滚轮或键盘操作
+          （纯移动鼠标时光标位置会变化，不计为触发输入）
         """
+        import ctypes
+        import ctypes.wintypes
+
+        user32 = ctypes.windll.user32
+        VK_MOUSE_BUTTONS = (0x01, 0x02, 0x04, 0x05, 0x06)  # 左/右/中/X1/X2
+
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        def last_input_tick():
+            lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
+            user32.GetLastInputInfo(ctypes.byref(lii))
+            return lii.dwTime
+
+        def any_button_down():
+            return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in VK_MOUSE_BUTTONS)
+
+        pt = ctypes.wintypes.POINT()
+
+        def cursor_pos():
+            user32.GetCursorPos(ctypes.byref(pt))
+            return (pt.x, pt.y)
+
+        prev_tick = last_input_tick()
+        prev_pos = cursor_pos()
+
         while not self._stop.is_set():
-            time.sleep(0.3)
-            if self.paused or not self._input_pending:
+            time.sleep(0.25)
+            if self.paused:
+                continue
+
+            # ---- 输入检测（零钩子开销） ----
+            tick = last_input_tick()
+            pos = cursor_pos()
+            if any_button_down():
+                self._last_input = time.time()
+                self._input_pending = True
+            elif tick != prev_tick and pos == prev_pos:
+                # 有新输入但光标没动：滚轮或键盘
+                self._last_input = time.time()
+                self._input_pending = True
+            prev_tick, prev_pos = tick, pos
+
+            # ---- 静置判定 ----
+            if not self._input_pending:
                 continue
             if (time.time() - self._last_input) * 1000 < self.input_idle_ms:
                 continue  # 还在连续操作中，等停下来
