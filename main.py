@@ -87,7 +87,7 @@ class App:
         # ---------- UI ----------
         self.root = tk.Tk()
         self.root.title("游戏实时翻译")
-        self.root.geometry("800x360")
+        self.root.geometry("1100x440")
         self.root.attributes("-topmost", True)  # 控制面板永久置顶，方便实时操作
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
