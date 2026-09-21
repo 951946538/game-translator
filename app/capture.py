@@ -47,6 +47,7 @@ class RegionMonitor:
         self._last_input = 0.0        # 最近一次点击/滚轮时间（输入触发模式）
         self._input_pending = False
         self._last_processed_small = None  # 上次已识别画面的缩略图
+        self._prev_emit_small = None  # 上次已识别画面的网格灰度图（变化区域裁剪用）
 
     # ---------- 生命周期 ----------
 
@@ -197,24 +198,59 @@ class RegionMonitor:
                     self._pending_since = now
 
     def _emit_frame(self, frame):
-        logging.info("触发识别")
+        """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）"""
+        h, w = frame.shape[:2]
+        x0, y0, x1, y1 = self._change_bbox(frame)
+        margin = 24
+        x0 = max(0, x0 - margin)
+        y0 = max(0, y0 - margin)
+        x1 = min(w, x1 + margin)
+        y1 = min(h, y1 + margin)
+        # 变化区域过大（转场/换页）或异常时退化为整帧
+        if x1 <= x0 or y1 <= y0 or (x1 - x0) * (y1 - y0) > 0.75 * w * h:
+            x0, y0, x1, y1 = 0, 0, w, h
+
+        self._prev_emit_small = self._gray(frame, self._GRID)
+        crop = frame[y0:y1, x0:x1]
+        # origin：裁剪区左上角的屏幕物理坐标（OCR 结果坐标加上它才是全屏坐标）
+        origin = (self.region["left"] + x0, self.region["top"] + y0)
+        logging.info("触发识别：%dx%d（占画面 %.0f%%）", x1 - x0, y1 - y0, 100 * (x1 - x0) * (y1 - y0) / (w * h))
         try:
-            self.on_stable(frame)
+            self.on_stable(crop, origin)
         except Exception:
             logging.error("监控回调异常:\n%s", traceback.format_exc())
 
     def _emit(self):
-        logging.info("画面变化，触发识别")
         frame_out = self._pending_frame
         self._pending_frame = None
-        try:
-            self.on_stable(frame_out)
-        except Exception:
-            logging.error("监控回调异常:\n%s", traceback.format_exc())
+        self._emit_frame(frame_out)
+
+    # 变化检测网格（宽 x 高）
+    _GRID = (40, 24)
+
+    def _change_bbox(self, frame):
+        """与上次已识别帧网格级比对，返回变化区域包围盒（全分辨率坐标）"""
+        h, w = frame.shape[:2]
+        small = self._gray(frame, self._GRID)
+        if self._prev_emit_small is None:
+            return 0, 0, w, h
+        diff = np.abs(small.astype(np.int16) - self._prev_emit_small.astype(np.int16)).mean(axis=2)
+        changed = diff > 10
+        if not changed.any():
+            return 0, 0, w, h
+        ys, xs = np.where(changed)
+        gx, gy = w / self._GRID[0], h / self._GRID[1]
+        return (int(xs.min() * gx), int(ys.min() * gy),
+                int((xs.max() + 1) * gx), int((ys.max() + 1) * gy))
 
     @staticmethod
-    def _shrink_gray(frame, size=(160, 90)):
+    def _gray(frame, size):
         """缩小转灰度，加速差分"""
         import cv2  # paddleocr 自带 opencv
         small = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
         return np.dot(small[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+
+    @staticmethod
+    def _shrink_gray(frame, size=(160, 90)):
+        """缩小转灰度，加速差分"""
+        return RegionMonitor._gray(frame, size)

@@ -47,7 +47,7 @@ from app.ocr_engine import OCREngine
 from app.translator import Translator
 from app.overlay import OverlayWindow
 from app.region_select import select_region
-from app.hotkeys import HotkeyManager
+from app.hotkeys import HotkeyManager, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11
 
 
 class App:
@@ -190,23 +190,24 @@ class App:
             self.monitor.stop()
             self.monitor = None
 
-    def _on_stable_frame(self, frame):
-        """监控线程回调：画面稳定，交给 OCR 队列"""
+    def _on_stable_frame(self, frame, origin):
+        """监控线程回调：画面稳定，交给 OCR 队列（frame 为变化区域裁剪，origin 为其屏幕坐标）"""
         if not self.paused:
-            self.ocr_queue.put(frame)
+            self.ocr_queue.put((frame, origin))
 
     def _ocr_worker(self):
         """OCR 线程：丢弃积压旧帧只处理最新，识别结果交给翻译线程（流水线并发）"""
         while True:
-            frame = self.ocr_queue.get()
-            if frame is None:
+            item = self.ocr_queue.get()
+            if item is None:
                 break
             # 处理耗时可能超过截屏间隔：丢弃积压旧帧，只处理最新画面
             while True:
                 try:
-                    frame = self.ocr_queue.get_nowait()
+                    item = self.ocr_queue.get_nowait()
                 except queue.Empty:
                     break
+            frame, origin = item
             try:
                 with self._ocr_lock:
                     if self.ocr_engine is None:
@@ -214,12 +215,17 @@ class App:
                         self.ocr_engine = OCREngine(
                             lang="en",
                             min_score=self.config.get("ocr_min_score", default=0.6),
+                            high_accuracy=self.config.get("ocr_high_accuracy", default=False),
                         )
                         self.ui_queue.put(("status", f"监控中 · {self._region_text(self.config.region)}"))
 
                 if self.overlay_mode == "inplace":
-                    # 覆盖模式：带坐标识别，交给翻译线程
+                    # 覆盖模式：带坐标识别（裁剪区坐标 + origin 还原为屏幕绝对坐标）
                     items = self.ocr_engine.extract_detail(frame)
+                    ox, oy = origin
+                    for it in items:
+                        b = it["box"]
+                        it["box"] = [b[0] + ox, b[1] + oy, b[2] + ox, b[3] + oy]
                     logging.info("OCR 完成：%d 行", len(items))
                     if items:
                         self.translate_queue.put(("positioned", items))
@@ -247,15 +253,14 @@ class App:
                         continue
                     self._last_positioned_key = key
                     translated = self.translator.translate_lines(lines)
-                    ox, oy = self._region_offset or (0, 0)
                     fx, fy = self._dpi_fx, self._dpi_fy  # 物理 → tkinter 画布坐标
                     positioned = [
                         {
                             "box": [
-                                int((it["box"][0] + ox) * fx),
-                                int((it["box"][1] + oy) * fy),
-                                int((it["box"][2] + ox) * fx),
-                                int((it["box"][3] + oy) * fy),
+                                int(it["box"][0] * fx),
+                                int(it["box"][1] * fy),
+                                int(it["box"][2] * fx),
+                                int(it["box"][3] * fy),
                             ],
                             "text": t,
                         }
@@ -428,6 +433,10 @@ class App:
         self.stop_monitor()
         self.ocr_queue.put(None)
         self.translate_queue.put(None)
+        try:
+            self._hotkeys.stop()
+        except Exception:
+            pass
         self.config.save()
         self.root.destroy()
 
@@ -438,14 +447,14 @@ class App:
             self.start_monitor()
         self.overlay.update_status(self.translator.backend, self.paused)
 
-        hotkeys = HotkeyManager(
-            on_fullscreen=self.set_fullscreen_async,
-            on_select_region=self.select_region_async,
-            on_toggle_pause=self.toggle_pause,
-            on_switch_backend=self.switch_backend,
-            on_toggle_overlay_mode=self.toggle_overlay_mode,
-        )
-        hotkeys.start()
+        self._hotkeys = HotkeyManager({
+            VK_F7: self.set_fullscreen_async,
+            VK_F8: self.select_region_async,
+            VK_F9: self.toggle_pause,
+            VK_F10: self.switch_backend,
+            VK_F11: self.toggle_overlay_mode,
+        })
+        self._hotkeys.start()
 
         self.root.mainloop()
 

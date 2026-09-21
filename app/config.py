@@ -11,7 +11,7 @@ DEFAULT_CONFIG = {
     "capture_interval_ms": 1000,  # 截屏间隔（帧差模式用）
     "trigger_mode": "diff",       # 触发模式：diff 画面变化触发（推荐）/ input 点击停止3秒后识别
     "input_idle_ms": 3000,        # 输入触发模式：停止操作多久后识别
-    "ocr_high_accuracy": True,    # 使用 PP-OCRv5 server 高精度模型（更准，首次多下载约100MB）
+    "ocr_high_accuracy": False,   # true 使用 server 高精度模型（准但慢5~10倍）；默认 medium 快速模型
     "diff_threshold": 4.0,        # 帧差阈值（均值差，越小越灵敏）
     "stable_ms": 500,             # 画面稳定判定时间（毫秒），变化停止多久后触发 OCR
     "force_ocr_ms": 2500,         # 滚动兜底：内容持续变化超过该时长，按最新帧强制识别
