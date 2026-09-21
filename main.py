@@ -50,7 +50,7 @@ from app.ocr_engine import OCREngine
 from app.translator import Translator
 from app.overlay import OverlayWindow
 from app.region_select import select_region
-from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_LWIN, VK_RWIN
+from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F11, VK_LWIN, VK_RWIN
 from app.textblock import group_lines
 from app import vision
 
@@ -102,7 +102,8 @@ class App:
 
         self.ocr_engine = None          # PaddleOCR 首次使用时才初始化（启动快）
         self.monitor = None
-        self.paused = False
+        # 自动翻译开关（F7 进入游戏窗口时自动关闭，F9 切换，状态跨重启保存）
+        self.paused = not self.config.get("auto_translate", default=True)
         self._last_positioned_key = None  # 覆盖模式去重（与上一帧相同的文本集合不重复翻译）
         self._region_offset = (0, 0)      # 监控区域屏幕偏移（start_monitor 时更新）
         self._game_hwnd = None            # F7 捕获的游戏窗口句柄（Win 键智能屏蔽用）
@@ -204,13 +205,12 @@ class App:
         self.trigger_btn.grid(row=0, column=1, padx=3, pady=2)
         tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=2, padx=3, pady=2)
 
-        self.pause_btn = tk.Button(btns, text="暂停 (F9)", command=self.toggle_pause)
+        self.pause_btn = tk.Button(
+            btns, text="恢复 (F9)" if self.paused else "暂停 (F9)", command=self.toggle_pause,
+        )
         self.pause_btn.grid(row=1, column=0, padx=3, pady=2)
-        self.backend_btn = tk.Button(btns, text="", command=self.switch_backend)
-        self.backend_btn.grid(row=1, column=1, padx=3, pady=2)
         self.mode_btn = tk.Button(btns, text="", command=self.toggle_overlay_mode)
-        self.mode_btn.grid(row=1, column=2, padx=3, pady=2)
-        self._refresh_backend_btn()
+        self.mode_btn.grid(row=1, column=1, padx=3, pady=2)
         self._refresh_mode_btn()
 
         # ===== 右列：截图直译历史（每条 = 时间 + 截图缩略图 + 完整输出） =====
@@ -283,30 +283,33 @@ class App:
 
     # ---------- 状态提示 ----------
 
-    def _hide_own_windows(self):
-        """隐藏本工具所有可见顶层窗口（截图前调用，避免把自己的面板截进画面），
-        返回恢复函数。纯 Win32 API 不经过 Tk，可从任意线程安全调用。"""
+    def _own_window_rects(self):
+        """本工具自身不透明窗口的屏幕物理矩形列表（截图涂黑排除用）。
+        纯 Win32 查询，线程安全；跳过全屏矩形（inplace 覆盖层是透明画布，不遮挡游戏）。"""
         import ctypes
+        import ctypes.wintypes as wintypes
         user32 = ctypes.windll.user32
-        GA_ROOT, SW_HIDE, SW_SHOW = 2, 0, 5
-        hidden = []
+        GA_ROOT = 2
+        sw = user32.GetSystemMetrics(0)
+        sh = user32.GetSystemMetrics(1)
+        rects = []
         for wid in set(App.window_ids):
             try:
                 hwnd = user32.GetAncestor(wid, GA_ROOT) or wid
-                if hwnd and user32.IsWindowVisible(hwnd):
-                    user32.ShowWindow(hwnd, SW_HIDE)
-                    hidden.append(hwnd)
+                if not hwnd or not user32.IsWindowVisible(hwnd):
+                    continue
+                rect = wintypes.RECT()
+                if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    continue
+                rw, rh = rect.right - rect.left, rect.bottom - rect.top
+                if rw <= 0 or rh <= 0:
+                    continue
+                if rw >= sw and rh >= sh:  # inplace 全屏透明画布：跳过
+                    continue
+                rects.append((rect.left, rect.top, rw, rh))
             except Exception:
                 pass
-
-        def restore():
-            for hwnd in hidden:
-                try:
-                    user32.ShowWindow(hwnd, SW_SHOW)
-                except Exception:
-                    pass
-
-        return restore
+        return rects
 
     def _set_stage(self, text, color="#409eff", revert_to=None, revert_ms=2000):
         """更新大字状态；revert_to 给定时，revert_ms 后自动回落"""
@@ -336,9 +339,6 @@ class App:
         label = "覆盖原文" if self.overlay_mode == "inplace" else "独立面板"
         self.mode_btn.config(text=f"显示: {label} (F11)")
 
-    def _refresh_backend_btn(self):
-        self.backend_btn.config(text=f"后端: {self.translator.backend} (F10)")
-
     # ---------- 监控与翻译链路 ----------
 
     def start_monitor(self):
@@ -356,12 +356,14 @@ class App:
             trigger_mode=self.config.get("trigger_mode", default="diff"),
             input_idle_ms=self.config.get("input_idle_ms", default=3000),
             min_interval_ms=self.config.get("min_translate_interval_ms", default=5000),
-            hide_own_windows=self._hide_own_windows,
             game_hwnd=self._game_hwnd or 0,
+            exclude_rects_provider=self._own_window_rects,
         )
         # 记录区域在屏幕上的偏移，覆盖模式绘制时把 OCR 相对坐标转换为屏幕绝对坐标
         self._region_offset = self.monitor.offset
         self.monitor.start()
+        if self.paused:
+            self.monitor.pause()
 
     def stop_monitor(self):
         if self.monitor:
@@ -617,17 +619,22 @@ class App:
         return (pt.x, pt.y, w, h)
 
     def do_capture_foreground(self):
-        """游戏窗口模式：捕获前台窗口客户区（自动排除桌面/任务栏），仅翻译游戏内容
-        前台窗口默认使用覆盖原文显示。使用前先点击一下游戏窗口。"""
+        """游戏窗口模式：捕获前台窗口客户区（自动排除桌面/任务栏），仅翻译游戏内容。
+        进入游戏窗口时默认关闭自动翻译（F6/按钮手动触发，F9 恢复自动）。"""
         region = self._get_foreground_rect()
         if not region:
             self.status_var.set("请先点击游戏窗口，再按 F7（工具自身窗口会被排除）")
             return
         # 本工具进程是 DPI Aware 的，GetClientRect/ClientToScreen 返回物理像素
         self.config.region = region
-        self.status_var.set(f"监控中 · 游戏窗口 {region}")
+        # 进入游戏窗口：默认关闭自动翻译，仅手动触发（F6/按钮），F9 可恢复
+        self.config.set(False, "auto_translate")
+        self.config.save()
+        self.paused = True
+        self.pause_btn.config(text="恢复 (F9)")
+        self.status_var.set(f"监控中 · 游戏窗口 {region}（自动翻译已关闭）")
         self._positioned_history = []  # 换了监控区域，清空旧译文
-        self._set_stage("● 监控中")
+        self._set_stage("⏸ 自动翻译已关闭\nF6/F5 手动 · F9 恢复自动")
         self.start_monitor()
         if self.overlay_mode != "inplace":
             self._do_toggle_overlay_mode()
@@ -678,16 +685,10 @@ class App:
             else:
                 self.monitor.resume()
         self.pause_btn.config(text="恢复 (F9)" if self.paused else "暂停 (F9)")
+        self.config.set(not self.paused, "auto_translate")  # 状态跨重启保存
+        self.config.save()
         self._set_stage(self._monitor_status_text())
         self.overlay.update_status(self.translator.backend, self.paused)
-
-    def switch_backend(self):
-        self.root.after(0, self._do_switch_backend)
-
-    def _do_switch_backend(self):
-        new_backend = self.translator.switch_backend()
-        self._refresh_backend_btn()
-        self.overlay.update_status(new_backend, self.paused)
 
     # ---------- 悬浮窗模式切换（F11） ----------
 
@@ -735,7 +736,6 @@ class App:
             VK_F7: self.set_fullscreen_async,
             VK_F8: self.select_region_async,
             VK_F9: self.toggle_pause,
-            VK_F10: self.switch_backend,
             VK_F11: self.toggle_overlay_mode,
         }
         # 智能 Win 键屏蔽：仅游戏窗口在前台时吞掉，其他情况转发（开始菜单正常）

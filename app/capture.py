@@ -32,7 +32,7 @@ class RegionMonitor:
 
     def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500,
                  trigger_mode="diff", input_idle_ms=3000, min_interval_ms=0, hide_own_windows=None,
-                 game_hwnd=0):
+                 game_hwnd=0, exclude_rects_provider=None):
         if region == "fullscreen":
             # 全屏模式：监控主显示器整屏
             with _MSS() as sct:
@@ -50,8 +50,9 @@ class RegionMonitor:
         self.stable_ms = stable_ms
         self.force_ocr_ms = force_ocr_ms  # 持续变化（滚动/打字机）超过该时长后按最新帧强制识别
         self.min_interval = min_interval_ms / 1000  # 两次自动翻译的最小间隔（节流）
-        self.hide_own_windows = hide_own_windows  # 截图前隐藏自身窗口的回调（屏幕截图模式的兜底）
+        self.hide_own_windows = hide_own_windows  # 兼容保留（截图排除已改用涂黑方案）
         self.game_hwnd = game_hwnd or 0  # 游戏窗口句柄（F7 记录）：非零时直接从窗口抓取，悬浮窗永不混入
+        self.exclude_rects_provider = exclude_rects_provider  # 返回自身窗口屏幕矩形的回调（涂黑排除）
         self.on_stable = on_stable
 
         self.paused = False
@@ -308,39 +309,44 @@ class RegionMonitor:
             return None
 
     def raw_grab(self):
-        """常规截帧（帧差检测用）：优先游戏窗口直接抓取，否则截屏（不隐藏自身窗口，面板静止不干扰差分）"""
+        """常规截帧（帧差检测用）：优先游戏窗口直接抓取，否则截屏并涂黑自身窗口区域"""
         frame = self._grab_window()
         if frame is not None:
             return frame
         with _MSS() as sct:
             shot = sct.grab(self.region)
-        return np.asarray(shot)[:, :, :3]
+        frame = np.asarray(shot)[:, :, :3]
+        self._mask_own_windows(frame)
+        return frame
 
     def clean_grab(self):
         """出帧抓取（送 OCR/视觉模型）：优先游戏窗口直接抓取（悬浮窗永不混入），
-        否则截屏 + 隐藏自身窗口"""
+        否则截屏并涂黑自身窗口区域（像素级排除，无时序依赖）"""
         frame = self._grab_window()
         if frame is not None:
             return frame
-        restore = None
-        if self.hide_own_windows:
-            try:
-                restore = self.hide_own_windows()
-            except Exception:
-                restore = None
-        try:
-            if restore is not None:
-                time.sleep(0.03)  # 等待 DWM 合成将窗口从画面移除（低配机保险）
-            with _MSS() as sct:
-                shot = sct.grab(self.region)
-            return np.asarray(shot)[:, :, :3]
-        finally:
-            if restore:
-                restore()
+        with _MSS() as sct:
+            shot = sct.grab(self.region)
+        frame = np.asarray(shot)[:, :, :3]
+        self._mask_own_windows(frame)
+        return frame
 
-    def _clean_grab(self):
-        # 兼容旧名
-        return self.clean_grab()
+    def _mask_own_windows(self, frame):
+        """把本工具自身窗口覆盖的矩形区域涂黑——面板文字在像素层面被抹掉，
+        不依赖隐藏窗口的时序（涂黑区域 OCR 不识别、视觉模型忽略）"""
+        if not self.exclude_rects_provider:
+            return
+        try:
+            rects = self.exclude_rects_provider() or []
+        except Exception:
+            return
+        ox, oy = self.offset  # region 的屏幕物理原点
+        h, w = frame.shape[:2]
+        for rx, ry, rw, rh in rects:
+            x1, y1 = max(0, int(rx) - ox), max(0, int(ry) - oy)
+            x2, y2 = min(w, int(rx + rw) - ox), min(h, int(ry + rh) - oy)
+            if x2 > x1 and y2 > y1:
+                frame[y1:y2, x1:x2] = 0
 
     def _emit_frame(self, frame, force=False):
         """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）。

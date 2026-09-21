@@ -19,16 +19,8 @@ DEFAULT_CONFIG = {
     "min_translate_interval_ms": 5000,  # 翻译节流：两次自动翻译的最小间隔（毫秒），防止过于频繁
     "ocr_min_score": 0.6,         # OCR 置信度过滤：低于该分数的结果丢弃（过滤艺术字体噪声）
     "overlay_pad": 6,             # 覆盖块向四周扩大的像素数（盖住检测框外的字体边缘）
-    "backend": "llm",             # 当前翻译后端，取值须在 enabled_backends 内
+    "auto_translate": True,       # 自动翻译开关（F7 进入游戏窗口时自动置为 False，F9 切换）
     "overlay_mode": "inplace",    # 译文显示：panel 独立面板 / inplace 覆盖原文位置（F11 切换）
-    "enabled_backends": [         # 启用的后端（F10 在此列表内循环切换）；要恢复本地模型把 "ollama" 加回来即可
-        "llm",
-        "deepl",
-    ],
-    "ollama": {
-        "url": "http://127.0.0.1:11434",
-        "model": "qwen2.5:7b",
-    },
     "llm": {                      # OpenAI 兼容接口（DeepSeek / GLM / 通义等均可）
         "base_url": "https://api.deepseek.com/v1",
         "api_key": "",
@@ -38,9 +30,6 @@ DEFAULT_CONFIG = {
         "base_url": "https://api.deepseek.com/v1",
         "api_key": "",
         "model": "deepseek-v4-flash-vision-exp",
-    },
-    "deepl": {
-        "api_key": "",            # DeepL 免费版密钥，形如 xxx:fx
     },
     "overlay": {
         "opacity": 0.92,          # 悬浮窗不透明度 0~1

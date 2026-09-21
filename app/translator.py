@@ -1,4 +1,4 @@
-"""翻译模块：Ollama 本地模型 / OpenAI 兼容云 LLM / DeepL 三后端切换 + 结果缓存 + 逐行并发翻译"""
+"""翻译模块：OpenAI 兼容云 LLM（DeepSeek / GLM / 通义等）+ 结果缓存 + 逐行并发翻译"""
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -21,15 +21,6 @@ PARALLEL_WORKERS = 6  # 逐行并发翻译的线程数
 class Translator:
     def __init__(self, config):
         self.config = config
-        # 启用的后端从配置读取（config.json 的 enabled_backends）
-        backends = config.get("enabled_backends", default=["llm", "deepl"])
-        self.backends = [b for b in backends if b in ("ollama", "llm", "deepl")] or ["llm"]
-
-        # 当前后端不在启用列表（如旧配置仍是 ollama）→ 回退到第一个可用后端
-        if self.backend not in self.backends:
-            config.set(self.backends[0], "backend")
-            config.save()
-
         self._cache = {}          # 原文 -> 译文（整段与单行共用）
         self._cache_lock = threading.Lock()
         self._last_text = None    # 上一条原文（跳过重复）
@@ -38,15 +29,7 @@ class Translator:
 
     @property
     def backend(self):
-        return self.config.get("backend", default="llm")
-
-    def switch_backend(self):
-        """切换到下一个后端，返回新后端名"""
-        idx = self.backends.index(self.backend)
-        new = self.backends[(idx + 1) % len(self.backends)]
-        self.config.set(new, "backend")
-        self.config.save()
-        return new
+        return "llm"
 
     def translate(self, text):
         """整段翻译并缓存；与上一条相同返回 None"""
@@ -61,7 +44,7 @@ class Translator:
                 return self._cache[text]
 
         try:
-            result = self._dispatch(text, SYSTEM_PROMPT)
+            result = self._llm(text, SYSTEM_PROMPT)
         except Exception as e:
             return f"[翻译失败: {e}]"
 
@@ -93,7 +76,7 @@ class Translator:
 
         def work(src):
             try:
-                return self._dispatch(src, SYSTEM_PROMPT)
+                return self._llm(src, SYSTEM_PROMPT)
             except Exception as e:
                 return f"[翻译失败: {e}]"
 
@@ -114,42 +97,6 @@ class Translator:
             self._cache[src] = dst
         self._last_text = src
 
-    # ---------- 后端实现 ----------
-
-    def _dispatch(self, text, system=SYSTEM_PROMPT):
-        backend = self.backend
-        if backend == "ollama":
-            return self._ollama(text, system)
-        if backend == "llm":
-            return self._llm(text, system)
-        if backend == "deepl":
-            return self._deepl([text])[0]
-        raise RuntimeError(f"未知后端: {backend}")
-
-    def _chat(self, url, headers, payload):
-        resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
-
-    def _ollama(self, text, system):
-        url = self.config.get("ollama", "url", default="http://127.0.0.1:11434")
-        model = self.config.get("ollama", "model", default="qwen2.5:7b")
-        resp = requests.post(
-            f"{url.rstrip('/')}/api/chat",
-            json={
-                "model": model,
-                "stream": False,
-                "options": {"temperature": 0.3},
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": text},
-                ],
-            },
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()["message"]["content"].strip()
-
     def _llm(self, text, system):
         """OpenAI 兼容接口（DeepSeek / GLM / 通义等）"""
         base_url = self.config.get("llm", "base_url", default="").rstrip("/")
@@ -157,10 +104,10 @@ class Translator:
         model = self.config.get("llm", "model", default="")
         if not api_key:
             raise RuntimeError("未配置 llm.api_key（config.json）")
-        return self._chat(
+        resp = requests.post(
             f"{base_url}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
-            payload={
+            json={
                 "model": model,
                 "temperature": 0.3,
                 "messages": [
@@ -168,22 +115,7 @@ class Translator:
                     {"role": "user", "content": text},
                 ],
             },
-        )
-
-    def _deepl(self, texts):
-        """DeepL 支持一次传多段文本，天然保持行对应"""
-        api_key = self.config.get("deepl", "api_key", default="")
-        if not api_key:
-            raise RuntimeError("未配置 deepl.api_key（config.json）")
-        host = "api-free.deepl.com" if api_key.endswith(":fx") else "api.deepl.com"
-        data = []
-        for t in texts:
-            data.append(("text", t))
-        resp = requests.post(
-            f"https://{host}/v2/translate",
-            headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
-            data=data + [("target_lang", "ZH")],
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
-        return [item["text"].strip() for item in resp.json()["translations"]]
+        return resp.json()["choices"][0]["message"]["content"].strip()
