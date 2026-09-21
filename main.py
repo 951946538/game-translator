@@ -92,7 +92,8 @@ class App:
         # 记录两者比例，框选/绘制时统一换算，彻底解决高分屏（如 3800x2000）偏移问题。
         self.root.update_idletasks()
         import mss as _mss
-        with _mss.mss() as _sct:
+        _MSS = getattr(_mss, "MSS", _mss.mss)  # 兼容 mss 9.x(mss) / 10.x(MSS)
+        with _MSS() as _sct:
             _mon = _sct.monitors[1]
         self._dpi_fx = self.root.winfo_screenwidth() / _mon["width"]
         self._dpi_fy = self.root.winfo_screenheight() / _mon["height"]
@@ -123,7 +124,7 @@ class App:
                 self.ocr_engine = OCREngine(
                     lang="en",
                     min_score=self.config.get("ocr_min_score", default=0.6),
-                    high_accuracy=self.config.get("ocr_high_accuracy", default=True),
+                    high_accuracy=self.config.get("ocr_high_accuracy", default=False),
                 )
                 logging.info("PaddleOCR 模型加载完成")
             except Exception:

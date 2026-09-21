@@ -7,6 +7,8 @@ import traceback
 import mss
 import numpy as np
 
+_MSS = getattr(mss, "MSS", mss.mss)  # 兼容 mss 9.x(mss) / 10.x(MSS)
+
 
 class RegionMonitor:
     """
@@ -73,7 +75,7 @@ class RegionMonitor:
     # ---------- 内部逻辑 ----------
 
     def _loop(self):
-        with mss.mss() as sct:
+        with _MSS() as sct:
             if self.trigger_mode == "input":
                 self._input_loop(sct)
             else:

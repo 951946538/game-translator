@@ -17,7 +17,6 @@ class OCREngine:
 
         # 屏幕文本不需要文档方向分类/弯曲矫正/行方向分类，关闭后少加载 3 个模型、速度大增
         base_kwargs = dict(
-            lang=lang,
             enable_mkldnn=False,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
@@ -25,7 +24,8 @@ class OCREngine:
         )
 
         if high_accuracy:
-            # 高精度 server 模型（首次使用需下载约 100MB，识别明显更准）
+            # 高精度 server 模型（首次使用需下载约 100MB，识别明显更准）。
+            # 指定模型名时 lang/ocr_version 会被忽略，不传以避免警告
             try:
                 self.ocr = PaddleOCR(
                     text_detection_model_name="PP-OCRv5_server_det",
@@ -37,7 +37,7 @@ class OCREngine:
                 pass  # 模型名不可用则回退默认
 
         try:
-            self.ocr = PaddleOCR(**base_kwargs)
+            self.ocr = PaddleOCR(lang=lang, **base_kwargs)
         except TypeError:
             try:
                 self.ocr = PaddleOCR(lang=lang, use_angle_cls=False, show_log=False)
