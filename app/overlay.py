@@ -165,21 +165,28 @@ class OverlayWindow:
             line_h = item.get("line_h", y2 - y1) or (y2 - y1)
             font_size = max(9, min(int(line_h * 0.7), 18))
 
-            # ---- 自适应换行与背景尺寸（中英文长短不一）----
-            # 文本换行宽度 = 背景块宽度：译文再长也只在背景内换行，绝不横向溢出
-            bg_w = (x2 - x1) + 2 * pad + 2 * pad_x
-            wrap_w = bg_w
+            # ---- 背景尺寸：贴合实际内容，不虚胖 ----
+            box_w, box_h = x2 - x1, y2 - y1
+            bg_w = box_w + 2 * pad_x
+            wrap_w = bg_w  # 文本换行宽度 = 背景宽度，绝不横向溢出
             # 估算行数：中文字符宽≈字号（含少量英文/数字时略窄，估算留 5% 余量）
             chars_per_line = max(4, int(wrap_w / (font_size * 1.05)))
             n_lines = max(1, math.ceil(len(text) / chars_per_line))
             text_h = n_lines * font_size * 1.35
-            # 背景高度：至少盖住原检测框（含 50% 下缘扩展兜住艺术字），换行多时自动向下加高
-            base_h = (y2 - y1) + 2 * pad + int((y2 - y1) * 0.5)
+
+            # 背景高度：盖住原文框即可；
+            # 仅按钮/标签类矮块（行高小）加 30% 下缘扩展兜住艺术字下缘
+            if line_h < 26:
+                base_h = box_h + 2 * pad + int(box_h * 0.3)
+            else:
+                base_h = box_h + 2 * pad
             bg_h = max(base_h, int(text_h) + 2 * pad)
             by2 = y1 + bg_h  # 顶部对齐原文框，高度不足向下扩展
 
-            self.canvas.create_rectangle(
+            # 圆角色块：观感更轻，文字不多时不显得笨重
+            self._round_rect(
                 x1 - pad_x, y1 - pad, x2 + pad_x, by2,
+                r=min(8, bg_h // 4),
                 fill="#14141f", outline="",
             )
             self.canvas.create_text(
@@ -188,6 +195,19 @@ class OverlayWindow:
                 font=("Microsoft YaHei UI", -font_size),
                 width=wrap_w,
             )
+
+    def _round_rect(self, x1, y1, x2, y2, r=6, **kw):
+        """圆角矩形（Tk 无原生支持，用 12 点样条多边形模拟）"""
+        r = max(2, min(r, (x2 - x1) // 2, (y2 - y1) // 2))
+        pts = [
+            x1 + r, y1,  x2 - r, y1,
+            x2, y1,      x2, y1 + r,
+            x2, y2 - r,  x2, y2,
+            x2 - r, y2,  x1 + r, y2,
+            x1, y2,      x1, y2 - r,
+            x1, y1 + r,  x1, y1,
+        ]
+        return self.canvas.create_polygon(pts, smooth=True, **kw)
 
     # ---------- 状态栏 ----------
 
