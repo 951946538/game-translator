@@ -183,7 +183,7 @@ class OverlayWindow:
     def update_status(self, backend, paused):
         state = "⏸ 已暂停" if paused else "● 监控中"
         self._status_text = (
-            f"{state}  |  后端: {backend}  |  F7全屏 F8选区 F9暂停 F10后端 F11覆盖/面板"
+            f"{state}  |  后端: {backend}  |  F6立即翻译 F7窗口 F8选区 F9暂停 F10后端 F11显示"
         )
         if self.mode == "panel":
             self.status_var.set(self._status_text)

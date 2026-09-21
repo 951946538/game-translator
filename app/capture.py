@@ -19,10 +19,10 @@ class RegionMonitor:
     """
 
     def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500,
-                 trigger_mode="input", input_idle_ms=3000):
+                 trigger_mode="diff", input_idle_ms=3000):
         if region == "fullscreen":
             # 全屏模式：监控主显示器整屏
-            with mss.mss() as sct:
+            with _MSS() as sct:
                 mon = sct.monitors[1]  # monitors[0] 是所有显示器的并集，[1] 是主屏
             self.region = {"left": mon["left"], "top": mon["top"],
                            "width": mon["width"], "height": mon["height"]}
@@ -80,7 +80,7 @@ class RegionMonitor:
                 shot = sct.grab(self.region)
             frame = np.asarray(shot)[:, :, :3]
             logging.info("手动触发识别 (F6)")
-            self._emit_frame(frame)
+            self._emit_frame(frame, force=True)
         except Exception:
             logging.error("手动触发失败:\n%s", traceback.format_exc())
 
@@ -209,8 +209,9 @@ class RegionMonitor:
                 logging.error("帧差监控循环异常:\n%s", traceback.format_exc())
                 time.sleep(1)
 
-    def _emit_frame(self, frame):
-        """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）"""
+    def _emit_frame(self, frame, force=False):
+        """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）。
+        force=True 表示 F6 手动触发（暂停状态下也执行）。"""
         h, w = frame.shape[:2]
         x0, y0, x1, y1 = self._change_bbox(frame)
         margin = 24
@@ -228,7 +229,7 @@ class RegionMonitor:
         origin = (self.region["left"] + x0, self.region["top"] + y0)
         logging.info("触发识别：%dx%d（占画面 %.0f%%）", x1 - x0, y1 - y0, 100 * (x1 - x0) * (y1 - y0) / (w * h))
         try:
-            self.on_stable(crop, origin)
+            self.on_stable(crop, origin, force)
         except Exception:
             logging.error("监控回调异常:\n%s", traceback.format_exc())
 
@@ -271,8 +272,3 @@ class RegionMonitor:
         import cv2  # paddleocr 自带 opencv
         small = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
         return np.dot(small[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
-
-    @staticmethod
-    def _shrink_gray(frame, size=(160, 90)):
-        """缩小转灰度，加速差分"""
-        return RegionMonitor._gray(frame, size)

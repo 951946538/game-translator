@@ -1,8 +1,9 @@
 """
 游戏实时翻译工具
-链路：区域/全屏监控（帧差检测）→ PaddleOCR → 翻译后端（Ollama/LLM云API/DeepL 可切换）→ 置顶悬浮窗
+链路：游戏窗口/区域监控（帧差检测+变化区域裁剪）→ PaddleOCR（面板归组）
+    → 翻译后端（Ollama/LLM云API/DeepL 可切换，逐行并发）→ 置顶覆盖层/面板显示
 
-热键：F7 全屏模式 | F8 重新选区 | F9 暂停/恢复 | F10 切换翻译后端
+热键：F6 立即翻译 | F7 捕获游戏窗口 | F8 框选区域 | F9 暂停/恢复 | F10 切换后端 | F11 覆盖/面板
 """
 import sys
 import os
@@ -215,7 +216,7 @@ class App:
             stable_ms=self.config.get("stable_ms", default=500),
             on_stable=self._on_stable_frame,
             force_ocr_ms=self.config.get("force_ocr_ms", default=2500),
-            trigger_mode=self.config.get("trigger_mode", default="input"),
+            trigger_mode=self.config.get("trigger_mode", default="diff"),
             input_idle_ms=self.config.get("input_idle_ms", default=3000),
         )
         # 记录区域在屏幕上的偏移，覆盖模式绘制时把 OCR 相对坐标转换为屏幕绝对坐标
@@ -227,9 +228,10 @@ class App:
             self.monitor.stop()
             self.monitor = None
 
-    def _on_stable_frame(self, frame, origin):
-        """监控线程回调：画面稳定，交给 OCR 队列（frame 为变化区域裁剪，origin 为其屏幕坐标）"""
-        if not self.paused:
+    def _on_stable_frame(self, frame, origin, force=False):
+        """监控线程回调：画面稳定，交给 OCR 队列（frame 为变化区域裁剪，origin 为其屏幕坐标）。
+        force=True 为 F6 手动触发，暂停状态下依然执行。"""
+        if not self.paused or force:
             self.ui_queue.put(("stage", "⟳ 正在识别…"))
             self.ocr_queue.put((frame, origin))
 

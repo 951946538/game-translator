@@ -84,7 +84,10 @@ class OCREngine:
             for r in self.ocr.predict(img_bgr):
                 texts = r.get("rec_texts", []) if hasattr(r, "get") else list(getattr(r, "rec_texts", []))
                 polys = r.get("rec_polys", []) if hasattr(r, "get") else list(getattr(r, "rec_polys", []))
-                scores = r.get("rec_scores", []) if hasattr(r, "get") else list(getattr(r, "rec_scores", []))
+                # rec_scores 缺失时补 None，避免 zip 截断导致全部结果丢失
+                scores = r.get("rec_scores", None) if hasattr(r, "get") else getattr(r, "rec_scores", None)
+                if scores is None:
+                    scores = [None] * len(texts)
                 for t, poly, score in zip(texts, polys, scores):
                     t = str(t).strip()
                     if not self._accept(t, score, self.min_score):
@@ -98,6 +101,7 @@ class OCREngine:
                     })
         except AttributeError:
             # paddleocr 2.x：ocr 返回 [[box, (text, conf)], ...]
+            results = []  # 清空可能的部分结果，避免重复
             raw = self.ocr.ocr(img_bgr, cls=False)
             if raw:
                 for block in raw:
