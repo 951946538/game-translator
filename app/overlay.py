@@ -38,7 +38,7 @@ class OverlayWindow:
             self.canvas.pack(fill="both", expand=True)
             self._status_id = self.canvas.create_text(
                 12, sh - 28, anchor="w", fill="#8a94a6",
-                font=("Microsoft YaHei UI", 9), text="",
+                font=("Microsoft YaHei UI", -10), text="",
             )
             # 鼠标穿透必须在窗口映射之后再设置（过早会被 Tk 重置导致点击被拦截）
             self.win.after(300, self._make_clickthrough)
@@ -148,7 +148,7 @@ class OverlayWindow:
         sh = self.win.winfo_screenheight()
         self._status_id = self.canvas.create_text(
             12, sh - 28, anchor="w", fill="#8a94a6",
-            font=("Microsoft YaHei UI", 9), text=self._status_text,
+            font=("Microsoft YaHei UI", -10), text=self._status_text,
         )
 
         # 从上到下、从左到右绘制
@@ -166,13 +166,13 @@ class OverlayWindow:
                 x1 - pad, y1 - pad, x2 + pad, y2 + pad + extra_bottom,
                 fill="#14141f", outline="",
             )
-            # 字号随原文行高自适应
+            # 字号随原文行高自适应（负数=像素单位，避免 DPI 磅值放大导致文字超出框）
             line_h = max(y2 - y1, 14)
             font_size = max(10, min(int(line_h * 0.82), 22))
             self.canvas.create_text(
                 (x1 + x2) // 2, (y1 + y2) // 2 + extra_bottom // 2,
                 text=text, fill="#f0f0f0", justify="center",
-                font=("Microsoft YaHei UI", font_size),
+                font=("Microsoft YaHei UI", -font_size),
                 width=max((x2 - x1) * 2, 120),
             )
 
