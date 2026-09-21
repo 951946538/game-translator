@@ -19,7 +19,7 @@ class RegionMonitor:
     """
 
     def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500,
-                 trigger_mode="diff", input_idle_ms=3000):
+                 trigger_mode="diff", input_idle_ms=3000, min_interval_ms=0):
         if region == "fullscreen":
             # 全屏模式：监控主显示器整屏
             with _MSS() as sct:
@@ -36,6 +36,7 @@ class RegionMonitor:
         self.diff_threshold = diff_threshold
         self.stable_ms = stable_ms
         self.force_ocr_ms = force_ocr_ms  # 持续变化（滚动/打字机）超过该时长后按最新帧强制识别
+        self.min_interval = min_interval_ms / 1000  # 两次自动翻译的最小间隔（节流）
         self.on_stable = on_stable
 
         self.paused = False
@@ -50,6 +51,7 @@ class RegionMonitor:
         self._input_pending = False
         self._last_processed_small = None  # 上次已识别画面的缩略图
         self._prev_emit_small = None  # 上次已识别画面的网格灰度图（变化区域裁剪用）
+        self._last_emit_time = 0.0    # 上次触发翻译的时间（节流用）
 
     # ---------- 生命周期 ----------
 
@@ -195,15 +197,17 @@ class RegionMonitor:
                     now = time.time()
                     since_change_ms = (now - self._last_change_time) * 1000
                     since_pending_ms = (now - self._pending_since) * 1000
+                    since_emit_s = now - self._last_emit_time
 
-                    if since_change_ms >= self.stable_ms:
-                        # 画面已稳定：正常触发
+                    stable = since_change_ms >= self.stable_ms
+                    forced = since_pending_ms >= self.force_ocr_ms
+
+                    # 节流：两次翻译间隔不足 min_interval 时保留待处理帧，
+                    # 等间隔到了再触发（画面静止后仍会被翻译，不会漏）
+                    if (stable or forced) and since_emit_s >= self.min_interval:
                         self._emit()
-                    elif since_pending_ms >= self.force_ocr_ms:
-                        # 内容持续变化（滚动/打字机效果）：
-                        # 按最新帧强制识别，并重置计时按此间隔节流
-                        self._emit()
-                        self._pending_since = now
+                        if forced and not stable:
+                            self._pending_since = now
             except Exception:
                 # 任何异常都不允许杀死监控线程
                 logging.error("帧差监控循环异常:\n%s", traceback.format_exc())
@@ -211,7 +215,11 @@ class RegionMonitor:
 
     def _emit_frame(self, frame, force=False):
         """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）。
-        force=True 表示 F6 手动触发（暂停状态下也执行）。"""
+        force=True 表示 F6 手动触发（暂停状态下也执行，且不受节流限制）。"""
+        now = time.time()
+        if not force and now - self._last_emit_time < self.min_interval:
+            return  # 自动翻译节流兜底（input 模式/边界场景）；F6 手动触发不受限
+        self._last_emit_time = now
         h, w = frame.shape[:2]
         x0, y0, x1, y1 = self._change_bbox(frame)
         margin = 24

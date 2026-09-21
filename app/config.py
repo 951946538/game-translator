@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
     "diff_threshold": 4.0,        # 帧差阈值（均值差，越小越灵敏）
     "stable_ms": 500,             # 画面稳定判定时间（毫秒），变化停止多久后触发 OCR
     "force_ocr_ms": 2500,         # 滚动兜底：内容持续变化超过该时长，按最新帧强制识别
+    "min_translate_interval_ms": 5000,  # 翻译节流：两次自动翻译的最小间隔（毫秒），防止过于频繁
     "ocr_min_score": 0.6,         # OCR 置信度过滤：低于该分数的结果丢弃（过滤艺术字体噪声）
     "overlay_pad": 6,             # 覆盖块向四周扩大的像素数（盖住检测框外的字体边缘）
     "backend": "llm",             # 当前翻译后端，取值须在 enabled_backends 内

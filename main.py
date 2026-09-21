@@ -305,6 +305,7 @@ class App:
             force_ocr_ms=self.config.get("force_ocr_ms", default=2500),
             trigger_mode=self.config.get("trigger_mode", default="diff"),
             input_idle_ms=self.config.get("input_idle_ms", default=3000),
+            min_interval_ms=self.config.get("min_translate_interval_ms", default=5000),
         )
         # 记录区域在屏幕上的偏移，覆盖模式绘制时把 OCR 相对坐标转换为屏幕绝对坐标
         self._region_offset = self.monitor.offset

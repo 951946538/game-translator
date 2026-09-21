@@ -152,6 +152,7 @@ class OverlayWindow:
         )
 
         # 从上到下、从左到右绘制
+        import math
         for item in sorted(items, key=lambda it: (it["box"][1], it["box"][0])):
             x1, y1, x2, y2 = item["box"]
             text = item["text"]
@@ -160,20 +161,32 @@ class OverlayWindow:
             pad = self.pad
             # 水平额外扩展 3%：检测框常略窄于视觉文字（行尾残留问题）
             pad_x = pad + int((x2 - x1) * 0.03)
-            # 背景块直接盖住原文（向下多扩 50%，兜住按钮艺术字下缘）
-            extra_bottom = int((y2 - y1) * 0.5)
-            self.canvas.create_rectangle(
-                x1 - pad, y1 - pad, x2 + pad, y2 + pad + extra_bottom,
-                fill="#14141f", outline="",
-            )
             # 字号随平均行高自适应且小于原文（多行文本块用块内平均行高）
             line_h = item.get("line_h", y2 - y1) or (y2 - y1)
             font_size = max(9, min(int(line_h * 0.7), 18))
+
+            # ---- 自适应换行与背景尺寸（中英文长短不一）----
+            # 文本换行宽度 = 背景块宽度：译文再长也只在背景内换行，绝不横向溢出
+            bg_w = (x2 - x1) + 2 * pad + 2 * pad_x
+            wrap_w = bg_w
+            # 估算行数：中文字符宽≈字号（含少量英文/数字时略窄，估算留 5% 余量）
+            chars_per_line = max(4, int(wrap_w / (font_size * 1.05)))
+            n_lines = max(1, math.ceil(len(text) / chars_per_line))
+            text_h = n_lines * font_size * 1.35
+            # 背景高度：至少盖住原检测框（含 50% 下缘扩展兜住艺术字），换行多时自动向下加高
+            base_h = (y2 - y1) + 2 * pad + int((y2 - y1) * 0.5)
+            bg_h = max(base_h, int(text_h) + 2 * pad)
+            by2 = y1 + bg_h  # 顶部对齐原文框，高度不足向下扩展
+
+            self.canvas.create_rectangle(
+                x1 - pad_x, y1 - pad, x2 + pad_x, by2,
+                fill="#14141f", outline="",
+            )
             self.canvas.create_text(
-                (x1 + x2) // 2, (y1 + y2) // 2 + extra_bottom // 2,
+                (x1 + x2) // 2, (y1 - pad) + bg_h / 2,
                 text=text, fill="#f0f0f0", justify="center",
                 font=("Microsoft YaHei UI", -font_size),
-                width=max(int((x2 - x1) * 1.6), 120),
+                width=wrap_w,
             )
 
     # ---------- 状态栏 ----------
