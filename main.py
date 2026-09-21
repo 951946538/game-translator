@@ -27,7 +27,7 @@ if sys.platform == "win32":
         pass
 
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext  # noqa: F401（保留依赖声明，当前未使用）
 
 # 关键：开启进程 DPI 感知，让 tkinter 使用物理像素坐标，
 # 与截屏/OCR 的物理像素坐标一致（否则 125%/150% 缩放下覆盖位置整体偏移）
@@ -83,7 +83,7 @@ class App:
         # ---------- UI ----------
         self.root = tk.Tk()
         self.root.title("游戏实时翻译")
-        self.root.geometry("440x440")
+        self.root.geometry("420x280")
         self.root.attributes("-topmost", True)  # 控制面板永久置顶，方便实时操作
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -136,40 +136,67 @@ class App:
     # ---------- 控制面板 ----------
 
     def _build_panel(self):
-        tk.Label(
-            self.root, text="游戏实时翻译工具", font=("Microsoft YaHei UI", 14, "bold"),
-        ).pack(pady=(12, 4))
+        # 大字状态（翻译流程实时提示）
+        self.big_status_var = tk.StringVar(value="等待选择区域\n按 F7 捕获游戏窗口")
+        self.big_status = tk.Label(
+            self.root, textvariable=self.big_status_var,
+            font=("Microsoft YaHei UI", 16, "bold"), fg="#409eff",
+        )
+        self.big_status.pack(pady=(16, 4))
 
-        self.status_var = tk.StringVar(value="未选择监控区域，按 F8 或点击下方按钮框选")
-        tk.Label(self.root, textvariable=self.status_var, fg="#555", wraplength=380).pack(pady=2)
+        # 详细状态行
+        self.status_var = tk.StringVar(value="")
+        tk.Label(self.root, textvariable=self.status_var, fg="#888", font=("Microsoft YaHei UI", 9)).pack(pady=2)
 
+        # 按钮区（两行）
         btns = tk.Frame(self.root)
-        btns.pack(pady=8)
+        btns.pack(pady=10)
         self.trigger_btn = tk.Button(
             btns, text="立即翻译 (F6)", command=self.trigger_now_async,
             bg="#2d6a4f", fg="white", activebackground="#40916c",
         )
-        self.trigger_btn.grid(row=0, column=0, padx=3)
-        tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=1, padx=3)
-        tk.Button(btns, text="框选区域 (F8)", command=lambda: self.select_region_async()).grid(row=0, column=1, padx=3)
+        self.trigger_btn.grid(row=0, column=0, padx=3, pady=2)
+        tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=1, padx=3, pady=2)
+        tk.Button(btns, text="框选区域 (F8)", command=lambda: self.select_region_async()).grid(row=0, column=2, padx=3, pady=2)
+
         self.pause_btn = tk.Button(btns, text="暂停 (F9)", command=self.toggle_pause)
-        self.pause_btn.grid(row=0, column=2, padx=3)
+        self.pause_btn.grid(row=1, column=0, padx=3, pady=2)
         self.backend_btn = tk.Button(btns, text="", command=self.switch_backend)
-        self.backend_btn.grid(row=0, column=3, padx=3)
+        self.backend_btn.grid(row=1, column=1, padx=3, pady=2)
         self.mode_btn = tk.Button(btns, text="", command=self.toggle_overlay_mode)
-        self.mode_btn.grid(row=0, column=4, padx=3)
+        self.mode_btn.grid(row=1, column=2, padx=3, pady=2)
         self._refresh_backend_btn()
         self._refresh_mode_btn()
+
+    # ---------- 状态提示 ----------
+
+    def _set_stage(self, text, color="#409eff", revert_to=None, revert_ms=2000):
+        """更新大字状态；revert_to 给定时，revert_ms 后自动回落"""
+        self.big_status_var.set(text)
+        self.big_status.configure(fg=color)
+        revert_id = getattr(self, "_stage_revert_id", None)
+        if revert_id:
+            try:
+                self.root.after_cancel(revert_id)
+            except Exception:
+                pass
+            self._stage_revert_id = None
+        if revert_to:
+            def _revert():
+                self.big_status_var.set(revert_to)
+                self.big_status.configure(fg="#409eff")
+            self._stage_revert_id = self.root.after(revert_ms, _revert)
+
+    def _monitor_status_text(self):
+        if self.paused:
+            return "⏸ 已暂停"
+        if not self.config.region:
+            return "等待选择区域\n按 F7 捕获游戏窗口"
+        return "● 监控中"
 
     def _refresh_mode_btn(self):
         label = "覆盖原文" if self.overlay_mode == "inplace" else "独立面板"
         self.mode_btn.config(text=f"显示: {label} (F11)")
-
-        tk.Label(self.root, text="翻译历史", font=("Microsoft YaHei UI", 11, "bold")).pack(pady=(8, 0))
-        self.history = scrolledtext.ScrolledText(
-            self.root, font=("Microsoft YaHei UI", 10), wrap="word", state="disabled",
-        )
-        self.history.pack(fill="both", expand=True, padx=10, pady=(4, 10))
 
     def _refresh_backend_btn(self):
         self.backend_btn.config(text=f"后端: {self.translator.backend} (F10)")
@@ -203,6 +230,7 @@ class App:
     def _on_stable_frame(self, frame, origin):
         """监控线程回调：画面稳定，交给 OCR 队列（frame 为变化区域裁剪，origin 为其屏幕坐标）"""
         if not self.paused:
+            self.ui_queue.put(("stage", "⟳ 正在识别…"))
             self.ocr_queue.put((frame, origin))
 
     def _ocr_worker(self):
@@ -239,11 +267,13 @@ class App:
                         b["box"] = [bx[0] + ox, bx[1] + oy, bx[2] + ox, bx[3] + oy]
                     logging.info("OCR 完成：%d 行合并为 %d 个文本块", len(items), len(blocks))
                     if blocks:
+                        self.ui_queue.put(("stage", "⟳ 正在翻译…"))
                         self.translate_queue.put(("positioned", blocks))
                 else:
                     # 面板模式：整段识别，交给翻译线程
                     text = self.ocr_engine.extract(frame)
                     if text:
+                        self.ui_queue.put(("stage", "⟳ 正在翻译…"))
                         self.translate_queue.put(("panel", text))
             except Exception as e:
                 logging.error("OCR 处理失败:\n%s", traceback.format_exc())
@@ -293,10 +323,12 @@ class App:
                         if len(self._positioned_history) > 30:
                             self._positioned_history = self._positioned_history[-30:]
                         logging.info("翻译完成：%d 块（累计 %d 块）", len(positioned), len(self._positioned_history))
+                        self.ui_queue.put(("stage_done", len(positioned)))
                         self.ui_queue.put(("positioned", list(self._positioned_history)))
                 else:
                     translated = self.translator.translate(payload)
                     if translated is not None:
+                        self.ui_queue.put(("stage_done", None))
                         self.ui_queue.put(("translation", payload, translated))
             except Exception as e:
                 logging.error("翻译处理失败:\n%s", traceback.format_exc())
@@ -311,30 +343,22 @@ class App:
                 kind = item[0]
                 if kind == "status":
                     self.status_var.set(item[1])
+                elif kind == "stage":
+                    # 翻译流程阶段提示（正在识别/正在翻译）
+                    self._set_stage(item[1], "#e6a23c")
+                elif kind == "stage_done":
+                    count = item[1]
+                    text = f"✓ 翻译完成（{count} 块）" if count else "✓ 翻译完成"
+                    self._set_stage(text, "#67c23a", revert_to=self._monitor_status_text())
                 elif kind == "translation":
                     _, original, translated = item
                     self.overlay.update_translation(translated, self.translator.backend, self.paused)
-                    self._append_history(original, translated)
                 elif kind == "positioned":
                     _, positioned = item
                     self.overlay.update_positioned(positioned)
-                    self._append_history(
-                        "(覆盖模式译文)", "\n".join(p["text"] for p in positioned)
-                    )
         except queue.Empty:
             pass
         self.root.after(100, self._poll_ui_queue)
-
-    def _append_history(self, original, translated):
-        self.history.configure(state="normal")
-        self.history.insert("1.0", f"—— {self._now()} ——\n[原文]\n{original}\n\n[译文]\n{translated}\n\n")
-        self.history.see("1.0")
-        self.history.configure(state="disabled")
-
-    @staticmethod
-    def _now():
-        import datetime
-        return datetime.datetime.now().strftime("%H:%M:%S")
 
     # ---------- 热键动作（pynput 回调线程 → 调度到主线程） ----------
 
@@ -394,6 +418,7 @@ class App:
         self.config.region = region
         self.status_var.set(f"监控中 · 游戏窗口 {region}")
         self._positioned_history = []  # 换了监控区域，清空旧译文
+        self._set_stage("● 监控中")
         self.start_monitor()
         if self.overlay_mode != "inplace":
             self._do_toggle_overlay_mode()
@@ -428,6 +453,7 @@ class App:
             )
             self.config.region = region_phys
             self.status_var.set(f"监控中 · 区域 {region_phys}")
+            self._set_stage("● 监控中")
             self.start_monitor()
             self.overlay.update_status(self.translator.backend, self.paused)
 
@@ -442,6 +468,7 @@ class App:
             else:
                 self.monitor.resume()
         self.pause_btn.config(text="恢复 (F9)" if self.paused else "暂停 (F9)")
+        self._set_stage(self._monitor_status_text())
         self.overlay.update_status(self.translator.backend, self.paused)
 
     def switch_backend(self):
