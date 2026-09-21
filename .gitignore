@@ -1,0 +1,15 @@
+# 虚拟环境
+.venv/
+
+# 运行生成
+config.json
+pip-install*.log
+
+# 模型缓存
+.paddleocr/
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/

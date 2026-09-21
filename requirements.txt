@@ -1,0 +1,8 @@
+# Python 3.12 虚拟环境使用（PaddleOCR 暂不支持 3.13+）
+paddlepaddle>=2.6
+paddleocr>=2.7
+mss>=9.0
+numpy
+Pillow
+requests
+pynput
