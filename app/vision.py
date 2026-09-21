@@ -58,4 +58,9 @@ def translate_screenshot(frame_rgb, cfg):
         timeout=REQUEST_TIMEOUT,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    msg = resp.json()["choices"][0]["message"]
+    # 返回模型输出的全部内容：正文 + 思考过程（DeepSeek 可能带 reasoning_content）
+    return {
+        "content": (msg.get("content") or "").strip(),
+        "reasoning": (msg.get("reasoning_content") or "").strip(),
+    }

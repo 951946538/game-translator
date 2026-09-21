@@ -2,8 +2,9 @@
 游戏实时翻译工具
 链路：游戏窗口/区域监控（帧差检测+变化区域裁剪）→ PaddleOCR（面板归组）
     → 翻译后端（Ollama/LLM云API/DeepL 可切换，逐行并发）→ 置顶覆盖层/面板显示
+    F5 截图直译（视觉模型，右侧面板显示截图与完整输出）
 
-热键：F6 立即翻译 | F7 捕获游戏窗口 | F8 框选区域 | F9 暂停/恢复 | F10 切换后端 | F11 覆盖/面板
+热键：F5 截图直译 | F6 立即翻译 | F7 捕获游戏窗口 | F8 框选区域 | F9 暂停/恢复 | F10 切换后端 | F11 覆盖/面板
 """
 import sys
 import os
@@ -28,7 +29,8 @@ if sys.platform == "win32":
         pass
 
 import tkinter as tk
-from tkinter import scrolledtext
+import tkinter.ttk as ttk
+from datetime import datetime
 
 # 关键：开启进程 DPI 感知，让 tkinter 使用物理像素坐标，
 # 与截屏/OCR 的物理像素坐标一致（否则 125%/150% 缩放下覆盖位置整体偏移）
@@ -181,17 +183,78 @@ class App:
         self._refresh_backend_btn()
         self._refresh_mode_btn()
 
-        # ===== 右列：截图直译输出 =====
+        # ===== 右列：截图直译历史（每条 = 时间 + 截图缩略图 + 完整输出） =====
         right = tk.Frame(main_frame)
         right.pack(side="right", fill="both", expand=True)
         tk.Label(
-            right, text="截图直译（F5：整屏发给视觉模型，按阅读顺序输出）",
+            right, text="截图直译（F5：整屏发给视觉模型，含思考过程）",
             font=("Microsoft YaHei UI", 9, "bold"), fg="#7c3aed", anchor="w",
         ).pack(fill="x", pady=(0, 2))
-        self.vision_output = scrolledtext.ScrolledText(
-            right, font=("Microsoft YaHei UI", 10), wrap="word", state="disabled",
+
+        self.vision_canvas = tk.Canvas(right, highlightthickness=0)
+        vsb = ttk.Scrollbar(right, orient="vertical", command=self.vision_canvas.yview)
+        self.vision_canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.vision_canvas.pack(side="left", fill="both", expand=True)
+        self.vision_inner = tk.Frame(self.vision_canvas)
+        self._vision_win = self.vision_canvas.create_window((0, 0), window=self.vision_inner, anchor="nw")
+        self.vision_inner.bind(
+            "<Configure>",
+            lambda e: self.vision_canvas.configure(scrollregion=self.vision_canvas.bbox("all")),
         )
-        self.vision_output.pack(fill="both", expand=True)
+        self.vision_canvas.bind(
+            "<Configure>",
+            lambda e: self.vision_canvas.itemconfigure(self._vision_win, width=e.width),
+        )
+        self._vision_first = None  # 最早一条记录（新记录插到它上面，保持最新在顶部）
+        self._bind_wheel(self.vision_canvas)
+        self._bind_wheel(self.vision_inner)
+
+    def _bind_wheel(self, widget):
+        """鼠标滚轮：进入面板区域时接管滚动，离开后释放"""
+        widget.bind("<Enter>", lambda e: widget.bind_all(
+            "<MouseWheel>", lambda ev: self.vision_canvas.yview_scroll(int(-ev.delta / 120), "units")))
+        widget.bind("<Leave>", lambda e: widget.unbind_all("<MouseWheel>"))
+
+    def _append_vision_record(self, result, thumb):
+        """新增一条截图直译记录：时间戳 + 截图缩略图 + 完整输出（含思考过程）"""
+        from PIL import ImageTk
+
+        rec = tk.Frame(self.vision_inner, bd=1, relief="groove")
+        if self._vision_first is None:
+            rec.pack(fill="x", pady=5, padx=2)
+            self._vision_first = rec
+        else:
+            rec.pack(fill="x", pady=5, padx=2, before=self._vision_first)
+
+        tk.Label(
+            rec, text=f"🕐 {datetime.now().strftime('%H:%M:%S')} 截图直译",
+            font=("Microsoft YaHei UI", 9, "bold"), fg="#7c3aed", anchor="w",
+        ).pack(fill="x", padx=6, pady=(4, 2))
+
+        if thumb is not None:
+            photo = ImageTk.PhotoImage(thumb)
+            lbl = tk.Label(rec, image=photo, bd=0)
+            lbl.image = photo  # 持有引用防 GC 回收
+            lbl.pack(padx=6, pady=2)
+            self._bind_wheel(lbl)
+
+        content = result.get("content", "") or "（无输出）"
+        reasoning = result.get("reasoning", "")
+        full = content + (f"\n\n──── 思考过程 ────\n{reasoning}" if reasoning else "")
+
+        body = tk.Text(
+            rec, font=("Microsoft YaHei UI", 10), wrap="word", bd=0,
+            bg="#faf9ff", padx=6, pady=4,
+            height=min(30, max(4, full.count("\n") + 2)),
+        )
+        body.insert("1.0", full)
+        body.configure(state="disabled")
+        body.pack(fill="x", padx=4, pady=(0, 4))
+        self._bind_wheel(body)
+
+        self.vision_canvas.update_idletasks()
+        self.vision_canvas.yview_moveto(0)  # 最新记录滚动到顶部
 
     # ---------- 状态提示 ----------
 
@@ -383,10 +446,7 @@ class App:
                     _, positioned = item
                     self.overlay.update_positioned(positioned)
                 elif kind == "vision_result":
-                    self.vision_output.configure(state="normal")
-                    self.vision_output.delete("1.0", "end")
-                    self.vision_output.insert("1.0", item[1])
-                    self.vision_output.configure(state="disabled")
+                    self._append_vision_record(item[1], item[2])
         except queue.Empty:
             pass
         self.root.after(100, self._poll_ui_queue)
@@ -413,6 +473,7 @@ class App:
         try:
             import numpy as np
             import mss as _mss
+            from PIL import Image
             _MSS = getattr(_mss, "MSS", _mss.mss)
 
             self.ui_queue.put(("stage", "⟳ 截图发送中…"))
@@ -420,16 +481,25 @@ class App:
                 shot = sct.grab(self.monitor.region)
             frame = np.asarray(shot)[:, :, :3]
 
+            # 截图缩略图（在记录中体现本次翻译的是哪张图）
+            thumb = Image.fromarray(frame)
+            tw = 340
+            if thumb.width > tw:
+                thumb = thumb.resize((tw, max(1, round(thumb.height * tw / thumb.width))))
+
             self.ui_queue.put(("stage", "⟳ 视觉模型翻译中…"))
             logging.info("截图直译：发送 %dx%d 给视觉模型", frame.shape[1], frame.shape[0])
-            text = vision.translate_screenshot(frame, self.config)
+            result = vision.translate_screenshot(frame, self.config)
 
-            self.ui_queue.put(("vision_result", text))
+            self.ui_queue.put(("vision_result", result, thumb))
             self.ui_queue.put(("stage_done", None))
-            logging.info("截图直译完成：%d 字", len(text))
+            logging.info(
+                "截图直译完成：译文 %d 字，思考过程 %d 字",
+                len(result.get("content", "")), len(result.get("reasoning", "")),
+            )
         except Exception as e:
             logging.error("截图直译失败:\n%s", traceback.format_exc())
-            self.ui_queue.put(("vision_result", f"[截图直译失败: {e}]"))
+            self.ui_queue.put(("vision_result", {"content": f"[截图直译失败: {e}]", "reasoning": ""}, None))
 
     def _get_foreground_rect(self):
         """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。
