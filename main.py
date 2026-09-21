@@ -65,8 +65,8 @@ class App:
         self.root.geometry("440x440")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        self.overlay_mode = self.config.get("overlay_mode", default="inplace")
         self._build_panel()
-        self.overlay_mode = self.config.get("overlay_mode", default="panel")
         self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
 
         # OCR 工作线程
