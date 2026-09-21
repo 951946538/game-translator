@@ -166,9 +166,9 @@ class OverlayWindow:
                 x1 - pad, y1 - pad, x2 + pad, y2 + pad + extra_bottom,
                 fill="#14141f", outline="",
             )
-            # 字号随原文行高自适应（负数=像素单位，避免 DPI 磅值放大导致文字超出框）
+            # 字号随原文行高自适应且小于原文（负数=像素单位，避免 DPI 磅值放大）
             line_h = max(y2 - y1, 14)
-            font_size = max(10, min(int(line_h * 0.82), 22))
+            font_size = max(9, min(int(line_h * 0.7), 18))
             self.canvas.create_text(
                 (x1 + x2) // 2, (y1 + y2) // 2 + extra_bottom // 2,
                 text=text, fill="#f0f0f0", justify="center",

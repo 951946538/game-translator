@@ -51,7 +51,10 @@ from app.hotkeys import HotkeyManager
 
 
 class App:
+    window_ids = []  # 本工具所有窗口的 winfo_id（用于 F7 排除自身窗口）
+
     def __init__(self):
+        App.window_ids = []
         self.config = Config()
         self.translator = Translator(self.config)
 
@@ -99,6 +102,8 @@ class App:
         )
 
         self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
+        App.window_ids.append(self.root.winfo_id())
+        App.window_ids.append(self.overlay.win.winfo_id())
 
         # OCR 线程 + 翻译线程（并行流水线），启动即后台预加载模型
         threading.Thread(target=self._ocr_worker, daemon=True).start()
@@ -134,7 +139,7 @@ class App:
 
         btns = tk.Frame(self.root)
         btns.pack(pady=8)
-        tk.Button(btns, text="全屏模式 (F7)", command=self.set_fullscreen_async).grid(row=0, column=0, padx=3)
+        tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=0, padx=3)
         tk.Button(btns, text="框选区域 (F8)", command=lambda: self.select_region_async()).grid(row=0, column=1, padx=3)
         self.pause_btn = tk.Button(btns, text="暂停 (F9)", command=self.toggle_pause)
         self.pause_btn.grid(row=0, column=2, padx=3)
@@ -306,16 +311,54 @@ class App:
         self.root.after(0, self.do_select_region)
 
     def set_fullscreen_async(self):
-        self.root.after(0, self.do_set_fullscreen)
+        self.root.after(0, self.do_capture_foreground)
 
-    def do_set_fullscreen(self):
-        """全屏模式：监控整个主屏，无需框选（全屏游戏建议用无边框窗口模式）
-        全屏默认使用覆盖原文显示"""
-        self.config.region = "fullscreen"
-        self.status_var.set("监控中 · 全屏模式")
+    @staticmethod
+    def _get_foreground_rect():
+        """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，无法获取或目标是自己时返回 None"""
+        import ctypes
+        import ctypes.wintypes
+
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+
+        # 排除本工具自己的窗口（主面板/悬浮窗）
+        GA_ROOT = 2
+        my_windows = set()
+        for wid in App.window_ids:
+            try:
+                my_windows.add(user32.GetAncestor(user32.GetParent(wid), GA_ROOT))
+                my_windows.add(user32.GetAncestor(wid, GA_ROOT))
+            except Exception:
+                pass
+        if hwnd in my_windows:
+            return None
+
+        rect = ctypes.wintypes.RECT()
+        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            return None
+        pt = ctypes.wintypes.POINT(0, 0)
+        user32.ClientToScreen(hwnd, ctypes.byref(pt))
+        w, h = rect.right - rect.left, rect.bottom - rect.top
+        if w < 100 or h < 100:
+            return None
+        return (pt.x, pt.y, w, h)
+
+    def do_capture_foreground(self):
+        """游戏窗口模式：捕获前台窗口客户区（自动排除桌面/任务栏），仅翻译游戏内容
+        前台窗口默认使用覆盖原文显示。使用前先点击一下游戏窗口。"""
+        region = self._get_foreground_rect()
+        if not region:
+            self.status_var.set("请先点击游戏窗口，再按 F7（工具自身窗口会被排除）")
+            return
+        # 本工具进程是 DPI Aware 的，GetClientRect/ClientToScreen 返回物理像素
+        self.config.region = region
+        self.status_var.set(f"监控中 · 游戏窗口 {region}")
         self.start_monitor()
         if self.overlay_mode != "inplace":
-            self._do_toggle_overlay_mode()  # 全屏自动切覆盖原文
+            self._do_toggle_overlay_mode()
         else:
             self.overlay.update_status(self.translator.backend, self.paused)
 
@@ -373,6 +416,7 @@ class App:
         except Exception:
             pass
         self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
+        App.window_ids.append(self.overlay.win.winfo_id())
         self.overlay.update_status(self.translator.backend, self.paused)
         self._refresh_mode_btn()
         self._last_positioned_key = None  # 切换后强制重新翻译一次
