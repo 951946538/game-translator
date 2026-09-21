@@ -113,40 +113,40 @@ class RegionMonitor:
     def _diff_loop(self, sct):
         while not self._stop.is_set():
             time.sleep(self.interval)
-                if self.paused:
-                    continue
-                try:
-                    shot = sct.grab(self.region)
-                except Exception:
-                    continue
+            if self.paused:
+                continue
+            try:
+                shot = sct.grab(self.region)
+            except Exception:
+                continue
 
-                frame = np.asarray(shot)[:, :, :3]          # RGB
-                small = self._shrink_gray(frame)
+            frame = np.asarray(shot)[:, :, :3]          # RGB
+            small = self._shrink_gray(frame)
 
-                if self._prev_small is not None:
-                    diff = float(np.mean(np.abs(small.astype(np.int16) - self._prev_small.astype(np.int16))))
-                    if diff > self.diff_threshold:
-                        # 画面发生变化，记录并刷新变化时间
-                        if self._pending_frame is None:
-                            self._pending_since = time.time()
-                        self._pending_frame = frame
-                        self._last_change_time = time.time()
+            if self._prev_small is not None:
+                diff = float(np.mean(np.abs(small.astype(np.int16) - self._prev_small.astype(np.int16))))
+                if diff > self.diff_threshold:
+                    # 画面发生变化，记录并刷新变化时间
+                    if self._pending_frame is None:
+                        self._pending_since = time.time()
+                    self._pending_frame = frame
+                    self._last_change_time = time.time()
 
-                self._prev_small = small
+            self._prev_small = small
 
-                if self._pending_frame is not None:
-                    now = time.time()
-                    since_change_ms = (now - self._last_change_time) * 1000
-                    since_pending_ms = (now - self._pending_since) * 1000
+            if self._pending_frame is not None:
+                now = time.time()
+                since_change_ms = (now - self._last_change_time) * 1000
+                since_pending_ms = (now - self._pending_since) * 1000
 
-                    if since_change_ms >= self.stable_ms:
-                        # 画面已稳定：正常触发
-                        self._emit()
-                    elif since_pending_ms >= self.force_ocr_ms:
-                        # 内容持续变化（滚动/打字机效果）：
-                        # 按最新帧强制识别，并重置计时按此间隔节流
-                        self._emit()
-                        self._pending_since = now
+                if since_change_ms >= self.stable_ms:
+                    # 画面已稳定：正常触发
+                    self._emit()
+                elif since_pending_ms >= self.force_ocr_ms:
+                    # 内容持续变化（滚动/打字机效果）：
+                    # 按最新帧强制识别，并重置计时按此间隔节流
+                    self._emit()
+                    self._pending_since = now
 
     def _emit_frame(self, frame):
         logging.info("触发识别")
