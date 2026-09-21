@@ -54,6 +54,36 @@ from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10
 from app.textblock import group_lines
 from app import vision
 
+# 本工具自身 UI 的文案词表（OCR 兜底过滤：识别结果若全由这些词组成，说明截到了自己的面板，丢弃）
+_UI_WORDS = (
+    "f5", "f6", "f7", "f8", "f9", "f10", "f11",
+    "截图直译", "立即翻译", "游戏窗口", "框选区域", "选区", "窗口",
+    "暂停", "恢复", "后端", "显示", "覆盖原文", "独立面板",
+    "监控中", "已暂停", "等待选择区域", "捕获游戏窗口",
+    "正在识别", "正在翻译", "翻译完成", "截图发送中",
+    "视觉模型", "翻译中", "思考过程", "译文",
+    "按阅读顺序", "整屏发给", "含思考过程",
+    "llm", "deepl", "ollama",
+    "f6立即翻译", "f7窗口", "f8选区", "f9暂停", "f10后端", "f11显示",
+)
+
+
+def _is_own_ui_text(text):
+    """识别文本是否来自本工具自身 UI（截图混入面板时的终极兜底）。
+    规则：规范化后能被 UI 词表完全拆解 → 是自身文案。"""
+    import re
+    norm = re.sub(r"[\s()\[\]{}:：|·，,。.\-●○✓⟳⏸]+", "", text).lower()
+    if not norm or len(norm) > 60:  # 超长 text 不可能是纯 UI 文案拼接
+        return False
+    changed = True
+    while changed and norm:
+        changed = False
+        for w in _UI_WORDS:
+            if w in norm:
+                norm = norm.replace(w, "", 1)
+                changed = True
+    return norm == ""
+
 
 class App:
     window_ids = []  # 本工具所有窗口的 winfo_id（用于 F7 排除自身窗口）
@@ -327,6 +357,7 @@ class App:
             input_idle_ms=self.config.get("input_idle_ms", default=3000),
             min_interval_ms=self.config.get("min_translate_interval_ms", default=5000),
             hide_own_windows=self._hide_own_windows,
+            game_hwnd=self._game_hwnd or 0,
         )
         # 记录区域在屏幕上的偏移，覆盖模式绘制时把 OCR 相对坐标转换为屏幕绝对坐标
         self._region_offset = self.monitor.offset
@@ -372,6 +403,8 @@ class App:
                     # 覆盖模式：带坐标识别 + 按文本框面板归组（保证换行长句的翻译上下文完整）
                     items = self.ocr_engine.extract_detail(frame)
                     blocks = group_lines(items, frame=frame)
+                    # 兜底过滤：剔除误截到的本工具自身 UI 文案（按钮/状态文字）
+                    blocks = [b for b in blocks if not _is_own_ui_text(b.get("text", ""))]
                     ox, oy = origin
                     for b in blocks:
                         bx = b["box"]
@@ -383,7 +416,7 @@ class App:
                 else:
                     # 面板模式：整段识别，交给翻译线程
                     text = self.ocr_engine.extract(frame)
-                    if text:
+                    if text and not _is_own_ui_text(text):
                         self.ui_queue.put(("stage", "⟳ 正在翻译…"))
                         self.translate_queue.put(("panel", text))
             except Exception as e:
@@ -507,19 +540,15 @@ class App:
 
     def _vision_worker(self):
         try:
-            import numpy as np
-            import mss as _mss
             from PIL import Image
-            _MSS = getattr(_mss, "MSS", _mss.mss)
 
             self.ui_queue.put(("stage", "⟳ 截图发送中…"))
-            restore = self._hide_own_windows()  # 隐藏自身窗口，别把面板截给视觉模型
-            try:
-                with _MSS() as sct:
-                    shot = sct.grab(self.monitor.region)
-            finally:
-                restore()
-            frame = np.asarray(shot)[:, :, :3]
+            # 优先游戏窗口直接抓取（悬浮窗永不混入），否则屏幕+隐藏自身窗口
+            frame = self.monitor.clean_grab()
+            if frame is None:
+                self.ui_queue.put(("vision_delta", "[截图失败]"))
+                self.ui_queue.put(("vision_done", None))
+                return
 
             # 截图缩略图（在记录中体现本次翻译的是哪张图）
             thumb = Image.fromarray(frame)
@@ -632,6 +661,7 @@ class App:
                 int(region[3] / self._dpi_fy),
             )
             self.config.region = region_phys
+            self._game_hwnd = None  # 框选区域与游戏窗口不再对应，回退屏幕截图模式
             self.status_var.set(f"监控中 · 区域 {region_phys}")
             self._set_stage("● 监控中")
             self.start_monitor()

@@ -1,4 +1,5 @@
 """区域截屏与变化检测：只在画面内容稳定变化后才触发回调，避免重复翻译"""
+import ctypes
 import logging
 import threading
 import time
@@ -10,6 +11,17 @@ import numpy as np
 _MSS = getattr(mss, "MSS", mss.mss)  # 兼容 mss 9.x(mss) / 10.x(MSS)
 
 
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+        ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+        ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+        ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+        ("biClrImportant", ctypes.c_uint32),
+    ]
+
+
 class RegionMonitor:
     """
     持续监控屏幕区域：
@@ -19,7 +31,8 @@ class RegionMonitor:
     """
 
     def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500,
-                 trigger_mode="diff", input_idle_ms=3000, min_interval_ms=0, hide_own_windows=None):
+                 trigger_mode="diff", input_idle_ms=3000, min_interval_ms=0, hide_own_windows=None,
+                 game_hwnd=0):
         if region == "fullscreen":
             # 全屏模式：监控主显示器整屏
             with _MSS() as sct:
@@ -37,7 +50,8 @@ class RegionMonitor:
         self.stable_ms = stable_ms
         self.force_ocr_ms = force_ocr_ms  # 持续变化（滚动/打字机）超过该时长后按最新帧强制识别
         self.min_interval = min_interval_ms / 1000  # 两次自动翻译的最小间隔（节流）
-        self.hide_own_windows = hide_own_windows  # 截图前隐藏自身窗口的回调（避免把工具 UI 截进画面）
+        self.hide_own_windows = hide_own_windows  # 截图前隐藏自身窗口的回调（屏幕截图模式的兜底）
+        self.game_hwnd = game_hwnd or 0  # 游戏窗口句柄（F7 记录）：非零时直接从窗口抓取，悬浮窗永不混入
         self.on_stable = on_stable
 
         self.paused = False
@@ -76,10 +90,9 @@ class RegionMonitor:
             self._input_pending = True
 
     def capture_now(self):
-        """手动触发：立即截取一帧并识别翻译（F6）。
-        独立创建 mss 实例保证线程安全。"""
+        """手动触发：立即截取一帧并识别翻译（F6）。"""
         try:
-            frame = self._clean_grab()
+            frame = self.clean_grab()
             if frame is None:
                 return
             logging.info("手动触发识别 (F6)")
@@ -90,13 +103,12 @@ class RegionMonitor:
     # ---------- 内部逻辑 ----------
 
     def _loop(self):
-        with _MSS() as sct:
-            if self.trigger_mode == "input":
-                self._input_loop(sct)
-            else:
-                self._diff_loop(sct)
+        if self.trigger_mode == "input":
+            self._input_loop()
+        else:
+            self._diff_loop()
 
-    def _input_loop(self, sct):
+    def _input_loop(self):
         """
         输入触发模式：点击/滚轮/键盘停止 input_idle_ms（默认3秒）后识别一次。
         画面与上次识别相比没有变化则跳过。
@@ -159,7 +171,7 @@ class RegionMonitor:
                     continue  # 还在连续操作中，等停下来
                 self._input_pending = False
 
-                frame = self._clean_grab()
+                frame = self.clean_grab()
                 if frame is None:
                     continue
                 small = self._gray(frame, self._DIFF_SIZE)
@@ -175,15 +187,15 @@ class RegionMonitor:
                 logging.error("输入监控循环异常:\n%s", traceback.format_exc())
                 time.sleep(1)
 
-    def _diff_loop(self, sct):
+    def _diff_loop(self):
         while not self._stop.is_set():
             time.sleep(self.interval)
             if self.paused:
                 continue
             try:
-                shot = sct.grab(self.region)
-
-                frame = np.asarray(shot)[:, :, :3]          # RGB
+                frame = self.raw_grab()
+                if frame is None:
+                    continue
                 small = self._gray(frame, self._DIFF_SIZE)
 
                 if self._prev_small is not None and self._frame_changed(small, self._prev_small):
@@ -215,8 +227,101 @@ class RegionMonitor:
                 logging.error("帧差监控循环异常:\n%s", traceback.format_exc())
                 time.sleep(1)
 
-    def _clean_grab(self):
-        """截取一帧，截图期间隐藏本工具自身窗口——避免置顶面板的文字被截进画面参与 OCR"""
+    def _grab_window(self):
+        """直接从游戏窗口抓取客户区像素（PrintWindow/BitBlt，OBS 窗口捕获原理）。
+        与截屏不同：悬浮在游戏上方的任何窗口（包括本工具面板）都不会出现在画面里。
+        失败（窗口关闭/游戏禁止抓取返回黑图）返回 None。"""
+        hwnd = self.game_hwnd
+        if not hwnd:
+            return None
+        try:
+            import ctypes.wintypes as wintypes
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+
+            if not user32.IsWindow(hwnd):
+                logging.warning("游戏窗口已关闭，回退屏幕截图模式")
+                self.game_hwnd = 0
+                return None
+
+            # 客户区尺寸
+            cr = wintypes.RECT()
+            if not user32.GetClientRect(hwnd, ctypes.byref(cr)):
+                return None
+            cw, ch = cr.right, cr.bottom
+            if cw < 50 or ch < 50:
+                return None
+
+            # 整窗尺寸（PrintWindow 抓整窗，再裁客户区）
+            wr = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(wr))
+            ww, wh = wr.right - wr.left, wr.bottom - wr.top
+
+            hdc_win = user32.GetWindowDC(hwnd)
+            if not hdc_win:
+                return None
+            try:
+                hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
+                hbmp = gdi32.CreateCompatibleBitmap(hdc_win, ww, wh)
+                old = gdi32.SelectObject(hdc_mem, hbmp)
+                try:
+                    # PW_RENDERFULLCONTENT=2：DirectX/DWM 渲染内容（现代游戏）也能抓到
+                    ok = user32.PrintWindow(hwnd, hdc_mem, 2)
+                    if not ok:
+                        gdi32.BitBlt(hdc_mem, 0, 0, ww, wh, hdc_win, 0, 0, 0x00CC0020)  # SRCCOPY
+
+                    bmi = _BITMAPINFOHEADER()
+                    bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+                    bmi.biWidth = ww
+                    bmi.biHeight = wh
+                    bmi.biPlanes = 1
+                    bmi.biBitCount = 32
+                    bmi.biCompression = 0  # BI_RGB
+                    buf = ctypes.create_string_buffer(ww * wh * 4)
+                    n_scan = gdi32.GetDIBits(hdc_mem, hbmp, 0, wh, buf, ctypes.byref(bmi), 0)
+                    if n_scan != wh:
+                        return None
+                    # bottom-up BGRA → top-down RGB
+                    frame = np.frombuffer(buf, dtype=np.uint8).reshape(wh, ww, 4)
+                    frame = np.flipud(frame)[:, :, :3][:, :, ::-1].copy()
+
+                    # 裁剪客户区（客户区原点相对窗口左上角）
+                    pt = wintypes.POINT(0, 0)
+                    user32.ClientToScreen(hwnd, ctypes.byref(pt))
+                    cx, cy = max(0, pt.x - wr.left), max(0, pt.y - wr.top)
+                    frame = frame[cy:cy + ch, cx:cx + cw]
+
+                    # 全黑检测：部分游戏/驱动禁止抓取，返回纯黑图
+                    if frame.size == 0 or frame.std() < 1.0:
+                        logging.warning("窗口抓取返回黑图（游戏可能禁止抓取），回退屏幕截图")
+                        self.game_hwnd = 0  # 后续直接走屏幕模式，避免反复尝试
+                        return None
+                    return frame
+                finally:
+                    gdi32.SelectObject(hdc_mem, old)
+                    gdi32.DeleteObject(hbmp)
+                    gdi32.DeleteDC(hdc_mem)
+            finally:
+                user32.ReleaseDC(hwnd, hdc_win)
+        except Exception:
+            logging.error("窗口抓取异常，回退屏幕截图:\n%s", traceback.format_exc())
+            return None
+
+    def raw_grab(self):
+        """常规截帧（帧差检测用）：优先游戏窗口直接抓取，否则截屏（不隐藏自身窗口，面板静止不干扰差分）"""
+        frame = self._grab_window()
+        if frame is not None:
+            return frame
+        with _MSS() as sct:
+            shot = sct.grab(self.region)
+        return np.asarray(shot)[:, :, :3]
+
+    def clean_grab(self):
+        """出帧抓取（送 OCR/视觉模型）：优先游戏窗口直接抓取（悬浮窗永不混入），
+        否则截屏 + 隐藏自身窗口"""
+        frame = self._grab_window()
+        if frame is not None:
+            return frame
         restore = None
         if self.hide_own_windows:
             try:
@@ -224,12 +329,18 @@ class RegionMonitor:
             except Exception:
                 restore = None
         try:
+            if restore is not None:
+                time.sleep(0.03)  # 等待 DWM 合成将窗口从画面移除（低配机保险）
             with _MSS() as sct:
                 shot = sct.grab(self.region)
             return np.asarray(shot)[:, :, :3]
         finally:
             if restore:
                 restore()
+
+    def _clean_grab(self):
+        # 兼容旧名
+        return self.clean_grab()
 
     def _emit_frame(self, frame, force=False):
         """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）。
@@ -262,8 +373,8 @@ class RegionMonitor:
     def _emit(self):
         frame_out = self._pending_frame
         self._pending_frame = None
-        # 待处理帧是常规截图，可能包含工具面板内容：用隐藏自身窗口的干净画面重新截取
-        clean = self._clean_grab()
+        # 出帧时重新干净截取：窗口模式抓游戏内容（无悬浮窗），屏幕模式隐藏自身窗口
+        clean = self.clean_grab()
         if clean is not None:
             frame_out = clean
         if frame_out is not None:
