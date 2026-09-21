@@ -48,6 +48,7 @@ from app.translator import Translator
 from app.overlay import OverlayWindow
 from app.region_select import select_region
 from app.hotkeys import HotkeyManager, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11
+from app.textblock import group_lines
 
 
 class App:
@@ -220,15 +221,16 @@ class App:
                         self.ui_queue.put(("status", f"监控中 · {self._region_text(self.config.region)}"))
 
                 if self.overlay_mode == "inplace":
-                    # 覆盖模式：带坐标识别（裁剪区坐标 + origin 还原为屏幕绝对坐标）
+                    # 覆盖模式：带坐标识别 + 行合并为逻辑段落（保证换行长句的翻译上下文完整）
                     items = self.ocr_engine.extract_detail(frame)
                     ox, oy = origin
                     for it in items:
                         b = it["box"]
                         it["box"] = [b[0] + ox, b[1] + oy, b[2] + ox, b[3] + oy]
-                    logging.info("OCR 完成：%d 行", len(items))
-                    if items:
-                        self.translate_queue.put(("positioned", items))
+                    blocks = group_lines(items)
+                    logging.info("OCR 完成：%d 行合并为 %d 个文本块", len(items), len(blocks))
+                    if blocks:
+                        self.translate_queue.put(("positioned", blocks))
                 else:
                     # 面板模式：整段识别，交给翻译线程
                     text = self.ocr_engine.extract(frame)
