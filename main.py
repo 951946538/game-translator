@@ -122,6 +122,7 @@ class App:
                 self.ocr_engine = OCREngine(
                     lang="en",
                     min_score=self.config.get("ocr_min_score", default=0.6),
+                    high_accuracy=self.config.get("ocr_high_accuracy", default=True),
                 )
                 logging.info("PaddleOCR 模型加载完成")
             except Exception:

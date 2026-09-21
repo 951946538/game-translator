@@ -10,14 +10,34 @@ MAX_OCR_WIDTH = 1920
 
 
 class OCREngine:
-    def __init__(self, lang="en", min_score=0.6):
+    def __init__(self, lang="en", min_score=0.6, high_accuracy=True):
         from paddleocr import PaddleOCR
 
         self.min_score = min_score  # 置信度过滤：低于该分数的识别结果丢弃（过滤艺术字体噪声）
 
-        # paddleocr 3.x 支持 enable_mkldnn 参数；2.x 走旧参数
+        # 屏幕文本不需要文档方向分类/弯曲矫正/行方向分类，关闭后少加载 3 个模型、速度大增
+        base_kwargs = dict(
+            lang=lang,
+            enable_mkldnn=False,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
+
+        if high_accuracy:
+            # 高精度 server 模型（首次使用需下载约 100MB，识别明显更准）
+            try:
+                self.ocr = PaddleOCR(
+                    text_detection_model_name="PP-OCRv5_server_det",
+                    text_recognition_model_name="PP-OCRv5_server_rec",
+                    **base_kwargs,
+                )
+                return
+            except (TypeError, ValueError):
+                pass  # 模型名不可用则回退默认
+
         try:
-            self.ocr = PaddleOCR(lang=lang, enable_mkldnn=False)
+            self.ocr = PaddleOCR(**base_kwargs)
         except TypeError:
             try:
                 self.ocr = PaddleOCR(lang=lang, use_angle_cls=False, show_log=False)
