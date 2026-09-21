@@ -19,7 +19,7 @@ class RegionMonitor:
     """
 
     def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500,
-                 trigger_mode="diff", input_idle_ms=3000, min_interval_ms=0):
+                 trigger_mode="diff", input_idle_ms=3000, min_interval_ms=0, hide_own_windows=None):
         if region == "fullscreen":
             # 全屏模式：监控主显示器整屏
             with _MSS() as sct:
@@ -37,6 +37,7 @@ class RegionMonitor:
         self.stable_ms = stable_ms
         self.force_ocr_ms = force_ocr_ms  # 持续变化（滚动/打字机）超过该时长后按最新帧强制识别
         self.min_interval = min_interval_ms / 1000  # 两次自动翻译的最小间隔（节流）
+        self.hide_own_windows = hide_own_windows  # 截图前隐藏自身窗口的回调（避免把工具 UI 截进画面）
         self.on_stable = on_stable
 
         self.paused = False
@@ -78,9 +79,9 @@ class RegionMonitor:
         """手动触发：立即截取一帧并识别翻译（F6）。
         独立创建 mss 实例保证线程安全。"""
         try:
-            with _MSS() as sct:
-                shot = sct.grab(self.region)
-            frame = np.asarray(shot)[:, :, :3]
+            frame = self._clean_grab()
+            if frame is None:
+                return
             logging.info("手动触发识别 (F6)")
             self._emit_frame(frame, force=True)
         except Exception:
@@ -158,8 +159,9 @@ class RegionMonitor:
                     continue  # 还在连续操作中，等停下来
                 self._input_pending = False
 
-                shot = sct.grab(self.region)
-                frame = np.asarray(shot)[:, :, :3]
+                frame = self._clean_grab()
+                if frame is None:
+                    continue
                 small = self._gray(frame, self._DIFF_SIZE)
 
                 # 与上次已识别画面比对，没变化就不重复识别
@@ -213,6 +215,22 @@ class RegionMonitor:
                 logging.error("帧差监控循环异常:\n%s", traceback.format_exc())
                 time.sleep(1)
 
+    def _clean_grab(self):
+        """截取一帧，截图期间隐藏本工具自身窗口——避免置顶面板的文字被截进画面参与 OCR"""
+        restore = None
+        if self.hide_own_windows:
+            try:
+                restore = self.hide_own_windows()
+            except Exception:
+                restore = None
+        try:
+            with _MSS() as sct:
+                shot = sct.grab(self.region)
+            return np.asarray(shot)[:, :, :3]
+        finally:
+            if restore:
+                restore()
+
     def _emit_frame(self, frame, force=False):
         """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）。
         force=True 表示 F6 手动触发（暂停状态下也执行，且不受节流限制）。"""
@@ -244,7 +262,12 @@ class RegionMonitor:
     def _emit(self):
         frame_out = self._pending_frame
         self._pending_frame = None
-        self._emit_frame(frame_out)
+        # 待处理帧是常规截图，可能包含工具面板内容：用隐藏自身窗口的干净画面重新截取
+        clean = self._clean_grab()
+        if clean is not None:
+            frame_out = clean
+        if frame_out is not None:
+            self._emit_frame(frame_out)
 
     # 变化检测网格（宽 x 高）
     _GRID = (80, 45)

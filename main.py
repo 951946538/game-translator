@@ -258,6 +258,31 @@ class App:
 
     # ---------- 状态提示 ----------
 
+    def _hide_own_windows(self):
+        """隐藏本工具所有可见顶层窗口（截图前调用，避免把自己的面板截进画面），
+        返回恢复函数。纯 Win32 API 不经过 Tk，可从任意线程安全调用。"""
+        import ctypes
+        user32 = ctypes.windll.user32
+        GA_ROOT, SW_HIDE, SW_SHOW = 2, 0, 5
+        hidden = []
+        for wid in set(App.window_ids):
+            try:
+                hwnd = user32.GetAncestor(wid, GA_ROOT) or wid
+                if hwnd and user32.IsWindowVisible(hwnd):
+                    user32.ShowWindow(hwnd, SW_HIDE)
+                    hidden.append(hwnd)
+            except Exception:
+                pass
+
+        def restore():
+            for hwnd in hidden:
+                try:
+                    user32.ShowWindow(hwnd, SW_SHOW)
+                except Exception:
+                    pass
+
+        return restore
+
     def _set_stage(self, text, color="#409eff", revert_to=None, revert_ms=2000):
         """更新大字状态；revert_to 给定时，revert_ms 后自动回落"""
         self.big_status_var.set(text)
@@ -306,6 +331,7 @@ class App:
             trigger_mode=self.config.get("trigger_mode", default="diff"),
             input_idle_ms=self.config.get("input_idle_ms", default=3000),
             min_interval_ms=self.config.get("min_translate_interval_ms", default=5000),
+            hide_own_windows=self._hide_own_windows,
         )
         # 记录区域在屏幕上的偏移，覆盖模式绘制时把 OCR 相对坐标转换为屏幕绝对坐标
         self._region_offset = self.monitor.offset
@@ -478,8 +504,12 @@ class App:
             _MSS = getattr(_mss, "MSS", _mss.mss)
 
             self.ui_queue.put(("stage", "⟳ 截图发送中…"))
-            with _MSS() as sct:
-                shot = sct.grab(self.monitor.region)
+            restore = self._hide_own_windows()  # 隐藏自身窗口，别把面板截给视觉模型
+            try:
+                with _MSS() as sct:
+                    shot = sct.grab(self.monitor.region)
+            finally:
+                restore()
             frame = np.asarray(shot)[:, :, :3]
 
             # 截图缩略图（在记录中体现本次翻译的是哪张图）
