@@ -16,6 +16,7 @@ class OverlayWindow:
         self.win.attributes("-topmost", True)            # 永远置顶
         self.font_size = cfg.get("font_size", 13)
         self.max_width = cfg.get("max_width", 560)
+        self.pad = cfg.get("pad", 6)  # 覆盖块向外扩大的像素数
 
         if mode == "inplace":
             # ===== 覆盖模式：全屏透明画布，译文画在原文坐标上 =====
@@ -122,17 +123,18 @@ class OverlayWindow:
             text = item["text"]
             if not text:
                 continue
-            pad = 4
-            # 背景块盖住原文
+            pad = self.pad
+            # 背景块盖住原文（向下多扩 50%：中文译文字数通常少于英文，但按钮艺术字下缘常超出检测框）
+            extra_bottom = int((y2 - y1) * 0.5)
             self.canvas.create_rectangle(
-                x1 - pad, y1 - pad, x2 + pad, y2 + pad,
+                x1 - pad, y1 - pad, x2 + pad, y2 + pad + extra_bottom,
                 fill="#14141f", outline="",
             )
             # 字号随原文行高自适应（中文比英文宽，适当放大区域）
             line_h = max(y2 - y1, 14)
             font_size = max(10, min(int(line_h * 0.82), 22))
             self.canvas.create_text(
-                (x1 + x2) // 2, (y1 + y2) // 2,
+                (x1 + x2) // 2, (y1 + y2) // 2 + extra_bottom // 2,
                 text=text, fill="#f0f0f0", justify="center",
                 font=("Microsoft YaHei UI", font_size),
                 width=max((x2 - x1) * 2, 120),

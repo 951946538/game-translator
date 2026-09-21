@@ -161,7 +161,10 @@ class App:
             try:
                 if self.ocr_engine is None:
                     self.ui_queue.put(("status", "正在加载 PaddleOCR 模型（首次约 10-30 秒）…"))
-                    self.ocr_engine = OCREngine(lang="en")
+                    self.ocr_engine = OCREngine(
+                        lang="en",
+                        min_score=self.config.get("ocr_min_score", default=0.6),
+                    )
                     self.ui_queue.put(("status", f"监控中 · {self._region_text(self.config.region)}"))
 
                 if self.overlay_mode == "inplace":

@@ -9,8 +9,10 @@ MAX_OCR_WIDTH = 1280
 
 
 class OCREngine:
-    def __init__(self, lang="en"):
+    def __init__(self, lang="en", min_score=0.6):
         from paddleocr import PaddleOCR
+
+        self.min_score = min_score  # 置信度过滤：低于该分数的识别结果丢弃（过滤艺术字体噪声）
 
         # paddleocr 3.x 支持 enable_mkldnn 参数；2.x 走旧参数
         try:
@@ -20,6 +22,22 @@ class OCREngine:
                 self.ocr = PaddleOCR(lang=lang, use_angle_cls=False, show_log=False)
             except TypeError:
                 self.ocr = PaddleOCR(lang=lang)
+
+    @staticmethod
+    def _accept(text, score, min_score):
+        """噪声过滤：低置信度、纯符号、超短纯字母数字的结果丢弃"""
+        if score is not None and score < min_score:
+            return False
+        t = text.strip()
+        if not t:
+            return False
+        has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in t)
+        has_alnum = any(ch.isalnum() for ch in t)
+        if not has_alnum and not has_cjk:
+            return False  # 纯符号/标点
+        if len(t) <= 2 and not has_cjk:
+            return False  # 超短纯字母数字（地图装饰字母等噪声）
+        return True
 
     def extract_detail(self, frame_rgb):
         """
@@ -45,13 +63,17 @@ class OCREngine:
             for r in self.ocr.predict(img_bgr):
                 texts = r.get("rec_texts", []) if hasattr(r, "get") else list(getattr(r, "rec_texts", []))
                 polys = r.get("rec_polys", []) if hasattr(r, "get") else list(getattr(r, "rec_polys", []))
-                for t, poly in zip(texts, polys):
+                scores = r.get("rec_scores", []) if hasattr(r, "get") else list(getattr(r, "rec_scores", []))
+                for t, poly, score in zip(texts, polys, scores):
+                    t = str(t).strip()
+                    if not self._accept(t, score, self.min_score):
+                        continue
                     pts = np.asarray(poly)
                     x1, y1 = pts.min(axis=0)
                     x2, y2 = pts.max(axis=0)
                     results.append({
                         "box": [int(x1 * scale), int(y1 * scale), int(x2 * scale), int(y2 * scale)],
-                        "text": str(t).strip(),
+                        "text": t,
                     })
         except AttributeError:
             # paddleocr 2.x：ocr 返回 [[box, (text, conf)], ...]
@@ -60,13 +82,16 @@ class OCREngine:
                 for block in raw:
                     if not block:
                         continue
-                    for box, (t, _conf) in block:
+                    for box, (t, conf) in block:
+                        t = str(t).strip()
+                        if not self._accept(t, conf, self.min_score):
+                            continue
                         xs = [p[0] for p in box]
                         ys = [p[1] for p in box]
                         results.append({
                             "box": [int(min(xs) * scale), int(min(ys) * scale),
                                     int(max(xs) * scale), int(max(ys) * scale)],
-                            "text": str(t).strip(),
+                            "text": t,
                         })
 
         return [r for r in results if r["text"]]
