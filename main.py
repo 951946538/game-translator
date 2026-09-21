@@ -71,6 +71,7 @@ class App:
         self.paused = False
         self._last_positioned_key = None  # 覆盖模式去重（与上一帧相同的文本集合不重复翻译）
         self._region_offset = (0, 0)      # 监控区域屏幕偏移（start_monitor 时更新）
+        self._game_hwnd = None            # F7 捕获的游戏窗口句柄（Win 键智能屏蔽用）
 
         # 队列：监控线程 -> OCR 线程 -> 翻译线程 -> UI 主线程（流水线并发）
         self.ocr_queue = queue.Queue()
@@ -322,9 +323,9 @@ class App:
     def set_fullscreen_async(self):
         self.root.after(0, self.do_capture_foreground)
 
-    @staticmethod
-    def _get_foreground_rect():
-        """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，无法获取或目标是自己时返回 None"""
+    def _get_foreground_rect(self):
+        """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。
+        无法获取或目标是自己时返回 None"""
         import ctypes
         import ctypes.wintypes
 
@@ -353,6 +354,7 @@ class App:
         w, h = rect.right - rect.left, rect.bottom - rect.top
         if w < 100 or h < 100:
             return None
+        self._game_hwnd = hwnd  # 记住游戏窗口，用于 Win 键智能屏蔽
         return (pt.x, pt.y, w, h)
 
     def do_capture_foreground(self):
@@ -370,6 +372,18 @@ class App:
             self._do_toggle_overlay_mode()
         else:
             self.overlay.update_status(self.translator.backend, self.paused)
+
+    def _on_win_key(self):
+        """Win 键智能屏蔽：游戏窗口在前台时吞掉（防游戏误触），
+        其他情况把按键转发回系统，开始菜单正常弹出"""
+        import ctypes
+        user32 = ctypes.windll.user32
+        if self._game_hwnd and user32.GetForegroundWindow() == self._game_hwnd:
+            return  # 游戏前台：吞掉
+        # 非游戏前台：转发 Win 键（原按键已被热键吞掉，这里重新注入）
+        KEYEVENTF_KEYUP = 0x0002
+        user32.keybd_event(VK_LWIN, 0, 0, 0)
+        user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
 
     @staticmethod
     def _region_text(region):
@@ -457,11 +471,11 @@ class App:
             VK_F10: self.switch_backend,
             VK_F11: self.toggle_overlay_mode,
         }
-        # 屏蔽 Win 键：注册为热键即可吞掉默认行为（开始菜单不再弹出），退出时自动注销恢复
+        # 智能 Win 键屏蔽：仅游戏窗口在前台时吞掉，其他情况转发（开始菜单正常）
         if self.config.get("disable_win_key", default=False):
-            hotkey_bindings[VK_LWIN] = lambda: None
-            hotkey_bindings[VK_RWIN] = lambda: None
-            logging.info("Win 键已屏蔽（工具运行期间），退出后自动恢复")
+            hotkey_bindings[VK_LWIN] = self._on_win_key
+            hotkey_bindings[VK_RWIN] = self._on_win_key
+            logging.info("Win 键智能屏蔽已启用（仅游戏前台时拦截）")
         self._hotkeys = HotkeyManager(hotkey_bindings)
         self._hotkeys.start()
 

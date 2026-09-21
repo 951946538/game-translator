@@ -12,7 +12,7 @@ DEFAULT_CONFIG = {
     "trigger_mode": "diff",       # 触发模式：diff 画面变化触发（推荐）/ input 点击停止3秒后识别
     "input_idle_ms": 3000,        # 输入触发模式：停止操作多久后识别
     "ocr_high_accuracy": False,   # true 使用 server 高精度模型（准但慢5~10倍）；默认 medium 快速模型
-    "disable_win_key": False,     # true 时工具运行期间屏蔽 Win 键（防游戏误触弹出开始菜单），退出自动恢复
+    "disable_win_key": False,     # true 时智能屏蔽 Win 键：仅游戏窗口前台时拦截（防误触），切出游戏正常使用
     "diff_threshold": 4.0,        # 帧差阈值（均值差，越小越灵敏）
     "stable_ms": 500,             # 画面稳定判定时间（毫秒），变化停止多久后触发 OCR
     "force_ocr_ms": 2500,         # 滚动兜底：内容持续变化超过该时长，按最新帧强制识别
