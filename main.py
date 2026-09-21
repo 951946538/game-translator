@@ -216,8 +216,9 @@ class App:
             "<MouseWheel>", lambda ev: self.vision_canvas.yview_scroll(int(-ev.delta / 120), "units")))
         widget.bind("<Leave>", lambda e: widget.unbind_all("<MouseWheel>"))
 
-    def _append_vision_record(self, result, thumb):
-        """新增一条截图直译记录：时间戳 + 截图缩略图 + 完整输出（含思考过程）"""
+    def _vision_record_start(self, thumb):
+        """新增一条截图直译记录骨架（时间戳 + 截图缩略图 + 空输出区），
+        正文由后续 vision_delta 流式追加（打字机效果）"""
         from PIL import ImageTk
 
         rec = tk.Frame(self.vision_inner, bd=1, relief="groove")
@@ -239,19 +240,13 @@ class App:
             lbl.pack(padx=6, pady=2)
             self._bind_wheel(lbl)
 
-        content = result.get("content", "") or "（无输出）"
-        reasoning = result.get("reasoning", "")
-        full = content + (f"\n\n──── 思考过程 ────\n{reasoning}" if reasoning else "")
-
         body = tk.Text(
             rec, font=("Microsoft YaHei UI", 10), wrap="word", bd=0,
-            bg="#faf9ff", padx=6, pady=4,
-            height=min(30, max(4, full.count("\n") + 2)),
+            bg="#faf9ff", padx=6, pady=4, height=6,
         )
-        body.insert("1.0", full)
-        body.configure(state="disabled")
         body.pack(fill="x", padx=4, pady=(0, 4))
         self._bind_wheel(body)
+        self._vision_body = body  # vision_delta 持续往这里追加
 
         self.vision_canvas.update_idletasks()
         self.vision_canvas.yview_moveto(0)  # 最新记录滚动到顶部
@@ -472,8 +467,22 @@ class App:
                 elif kind == "positioned":
                     _, positioned = item
                     self.overlay.update_positioned(positioned)
-                elif kind == "vision_result":
-                    self._append_vision_record(item[1], item[2])
+                elif kind == "vision_start":
+                    self._vision_record_start(item[1])
+                elif kind == "vision_delta":
+                    body = getattr(self, "_vision_body", None)
+                    if body is not None:
+                        body.configure(state="normal")
+                        body.insert("end", item[1])
+                        body.see("end")
+                        body.configure(state="disabled")
+                elif kind == "vision_done":
+                    body = getattr(self, "_vision_body", None)
+                    if body is not None:
+                        # 按最终内容行数调整高度（流式期间固定高度+自动滚动）
+                        n_lines = max(4, min(30, body.get("1.0", "end").count("\n") + 1))
+                        body.configure(height=n_lines)
+                        self._vision_body = None
         except queue.Empty:
             pass
         self.root.after(100, self._poll_ui_queue)
@@ -519,18 +528,30 @@ class App:
                 thumb = thumb.resize((tw, max(1, round(thumb.height * tw / thumb.width))))
 
             self.ui_queue.put(("stage", "⟳ 视觉模型翻译中…"))
-            logging.info("截图直译：发送 %dx%d 给视觉模型", frame.shape[1], frame.shape[0])
-            result = vision.translate_screenshot(frame, self.config)
+            self.ui_queue.put(("vision_start", thumb))
+            logging.info("截图直译：发送 %dx%d 给视觉模型（流式）", frame.shape[1], frame.shape[0])
 
-            self.ui_queue.put(("vision_result", result, thumb))
+            got_reasoning = got_content = False
+            for kind, chunk in vision.translate_screenshot_stream(frame, self.config):
+                if kind == "reasoning":
+                    if not got_reasoning:
+                        got_reasoning = True
+                        self.ui_queue.put(("vision_delta", "──── 思考过程 ────\n"))
+                    self.ui_queue.put(("vision_delta", chunk))
+                else:
+                    if not got_content:
+                        got_content = True
+                        if got_reasoning:
+                            self.ui_queue.put(("vision_delta", "\n\n──── 译文 ────\n"))
+                    self.ui_queue.put(("vision_delta", chunk))
+
+            self.ui_queue.put(("vision_done", None))
             self.ui_queue.put(("stage_done", None))
-            logging.info(
-                "截图直译完成：译文 %d 字，思考过程 %d 字",
-                len(result.get("content", "")), len(result.get("reasoning", "")),
-            )
+            logging.info("截图直译完成（流式）")
         except Exception as e:
             logging.error("截图直译失败:\n%s", traceback.format_exc())
-            self.ui_queue.put(("vision_result", {"content": f"[截图直译失败: {e}]", "reasoning": ""}, None))
+            self.ui_queue.put(("vision_delta", f"\n[截图直译失败: {e}]"))
+            self.ui_queue.put(("vision_done", None))
 
     def _get_foreground_rect(self):
         """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。

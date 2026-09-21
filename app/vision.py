@@ -1,22 +1,15 @@
-"""截图直译：整张游戏截图直接发给视觉大模型（DeepSeek-V4-Flash-Vision），输出纯文本译文。
+"""截图直译：整张游戏截图直接发给视觉大模型（DeepSeek-V4-Flash-Vision），流式输出译文。
 与 OCR 链路互补：不需要坐标的场景（公告/剧情整屏阅读）质量远超 OCR。"""
 import base64
+import json
 import logging
 import traceback
 
 import requests
 
-VISION_PROMPT = (
-    "You are a professional game localization translator. "
-    "Translate ALL English text visible in this game screenshot into Simplified Chinese. "
-    "Output translations in reading order (top to bottom, left to right), "
-    "one line per text element. "
-    "Skip numbers, pure symbols and text that is already Chinese. "
-    "Keep game terminology natural and idiomatic. "
-    "Output ONLY the translations, no explanations."
-)
+VISION_PROMPT = "帮我翻译图片中的游戏文本。按阅读顺序（从上到下、从左到右）逐行输出简体中文译文，只输出译文，不要任何解释。"
 
-REQUEST_TIMEOUT = 60
+REQUEST_TIMEOUT = (15, 180)  # (连接, 读取) —— 流式生成可能持续较久
 
 
 def encode_screenshot(frame_rgb, max_width=2048, quality=82):
@@ -32,8 +25,9 @@ def encode_screenshot(frame_rgb, max_width=2048, quality=82):
     return base64.b64encode(buf).decode("ascii")
 
 
-def translate_screenshot(frame_rgb, cfg):
-    """截图直译，返回译文纯文本。vision 段未配置 api_key 时复用 llm 段。"""
+def translate_screenshot_stream(frame_rgb, cfg):
+    """流式截图直译：逐块 yield ("reasoning"|"content", 增量文本)。
+    vision 段未配置 api_key 时复用 llm 段。"""
     base_url = cfg.get("vision", "base_url", default="") or cfg.get("llm", "base_url", default="")
     api_key = cfg.get("vision", "api_key", default="") or cfg.get("llm", "api_key", default="")
     model = cfg.get("vision", "model", default="deepseek-v4-flash-vision-exp")
@@ -47,6 +41,7 @@ def translate_screenshot(frame_rgb, cfg):
         json={
             "model": model,
             "temperature": 0.3,
+            "stream": True,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -55,12 +50,26 @@ def translate_screenshot(frame_rgb, cfg):
                 ],
             }],
         },
+        stream=True,
         timeout=REQUEST_TIMEOUT,
     )
     resp.raise_for_status()
-    msg = resp.json()["choices"][0]["message"]
-    # 返回模型输出的全部内容：正文 + 思考过程（DeepSeek 可能带 reasoning_content）
-    return {
-        "content": (msg.get("content") or "").strip(),
-        "reasoning": (msg.get("reasoning_content") or "").strip(),
-    }
+
+    # SSE 流解析：data: {...} / data: [DONE]
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+        rc = delta.get("reasoning_content")
+        if rc:
+            yield ("reasoning", rc)
+        c = delta.get("content")
+        if c:
+            yield ("content", c)
