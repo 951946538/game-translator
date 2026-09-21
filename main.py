@@ -43,9 +43,17 @@ class App:
         self.config = Config()
         self.translator = Translator(self.config)
 
+        # 进程降为低优先级：游戏优先占用 CPU，翻译工具不再抢资源导致卡顿
+        try:
+            import psutil
+            psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        except Exception:
+            pass
+
         self.ocr_engine = None          # PaddleOCR 首次使用时才初始化（启动快）
         self.monitor = None
         self.paused = False
+        self._last_positioned_key = None  # 覆盖模式去重（与上一帧相同的文本集合不重复翻译）
 
         # 队列：监控线程 -> OCR 工作线程 -> UI 主线程
         self.ocr_queue = queue.Queue()
@@ -54,11 +62,12 @@ class App:
         # ---------- UI ----------
         self.root = tk.Tk()
         self.root.title("游戏实时翻译")
-        self.root.geometry("420x420")
+        self.root.geometry("440x440")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self._build_panel()
-        self.overlay = OverlayWindow(self.root, self.config)
+        self.overlay_mode = self.config.get("overlay_mode", default="panel")
+        self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
 
         # OCR 工作线程
         threading.Thread(target=self._ocr_worker, daemon=True).start()
@@ -77,13 +86,20 @@ class App:
 
         btns = tk.Frame(self.root)
         btns.pack(pady=8)
-        tk.Button(btns, text="全屏模式 (F7)", command=self.set_fullscreen_async).grid(row=0, column=0, padx=4)
-        tk.Button(btns, text="框选区域 (F8)", command=lambda: self.select_region_async()).grid(row=0, column=1, padx=4)
+        tk.Button(btns, text="全屏模式 (F7)", command=self.set_fullscreen_async).grid(row=0, column=0, padx=3)
+        tk.Button(btns, text="框选区域 (F8)", command=lambda: self.select_region_async()).grid(row=0, column=1, padx=3)
         self.pause_btn = tk.Button(btns, text="暂停 (F9)", command=self.toggle_pause)
-        self.pause_btn.grid(row=0, column=2, padx=4)
+        self.pause_btn.grid(row=0, column=2, padx=3)
         self.backend_btn = tk.Button(btns, text="", command=self.switch_backend)
-        self.backend_btn.grid(row=0, column=3, padx=4)
+        self.backend_btn.grid(row=0, column=3, padx=3)
+        self.mode_btn = tk.Button(btns, text="", command=self.toggle_overlay_mode)
+        self.mode_btn.grid(row=0, column=4, padx=3)
         self._refresh_backend_btn()
+        self._refresh_mode_btn()
+
+    def _refresh_mode_btn(self):
+        label = "覆盖原文" if self.overlay_mode == "inplace" else "独立面板"
+        self.mode_btn.config(text=f"显示: {label} (F11)")
 
         tk.Label(self.root, text="翻译历史", font=("Microsoft YaHei UI", 11, "bold")).pack(pady=(8, 0))
         self.history = scrolledtext.ScrolledText(
@@ -132,13 +148,31 @@ class App:
                     self.ocr_engine = OCREngine(lang="en")
                     self.ui_queue.put(("status", f"监控中 · {self._region_text(self.config.region)}"))
 
-                text = self.ocr_engine.extract(frame)
-                if not text:
-                    continue
-
-                translated = self.translator.translate(text)
-                if translated is not None:
-                    self.ui_queue.put(("translation", text, translated))
+                if self.overlay_mode == "inplace":
+                    # ===== 覆盖模式：带坐标识别 + 逐行翻译，译文贴回原文位置 =====
+                    items = self.ocr_engine.extract_detail(frame)
+                    if not items:
+                        continue
+                    lines = [it["text"] for it in items]
+                    key = "\n".join(lines)
+                    if key == self._last_positioned_key:
+                        continue
+                    self._last_positioned_key = key
+                    translated = self.translator.translate_lines(lines)
+                    positioned = [
+                        {"box": it["box"], "text": t}
+                        for it, t in zip(items, translated) if t
+                    ]
+                    if positioned:
+                        self.ui_queue.put(("positioned", positioned))
+                else:
+                    # ===== 面板模式：整段识别翻译 =====
+                    text = self.ocr_engine.extract(frame)
+                    if not text:
+                        continue
+                    translated = self.translator.translate(text)
+                    if translated is not None:
+                        self.ui_queue.put(("translation", text, translated))
             except Exception as e:
                 logging.error("OCR/翻译处理失败:\n%s", traceback.format_exc())
                 self.ui_queue.put(("status", f"处理失败: {e}"))
@@ -156,6 +190,12 @@ class App:
                     _, original, translated = item
                     self.overlay.update_translation(translated, self.translator.backend, self.paused)
                     self._append_history(original, translated)
+                elif kind == "positioned":
+                    _, positioned = item
+                    self.overlay.update_positioned(positioned)
+                    self._append_history(
+                        "(覆盖模式译文)", "\n".join(p["text"] for p in positioned)
+                    )
         except queue.Empty:
             pass
         self.root.after(100, self._poll_ui_queue)
@@ -219,6 +259,24 @@ class App:
         self._refresh_backend_btn()
         self.overlay.update_status(new_backend, self.paused)
 
+    # ---------- 悬浮窗模式切换（F11） ----------
+
+    def toggle_overlay_mode(self):
+        self.root.after(0, self._do_toggle_overlay_mode)
+
+    def _do_toggle_overlay_mode(self):
+        self.overlay_mode = "panel" if self.overlay_mode == "inplace" else "inplace"
+        self.config.set(self.overlay_mode, "overlay_mode")
+        self.config.save()
+        try:
+            self.overlay.win.destroy()
+        except Exception:
+            pass
+        self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
+        self.overlay.update_status(self.translator.backend, self.paused)
+        self._refresh_mode_btn()
+        self._last_positioned_key = None  # 切换后强制重新翻译一次
+
     # ---------- 生命周期 ----------
 
     def on_close(self):
@@ -239,6 +297,7 @@ class App:
             on_select_region=self.select_region_async,
             on_toggle_pause=self.toggle_pause,
             on_switch_backend=self.switch_backend,
+            on_toggle_overlay_mode=self.toggle_overlay_mode,
         )
         hotkeys.start()
 
