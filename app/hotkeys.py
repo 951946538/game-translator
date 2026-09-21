@@ -12,6 +12,8 @@ VK_F8 = 0x77
 VK_F9 = 0x78
 VK_F10 = 0x79
 VK_F11 = 0x7A
+VK_LWIN = 0x5B  # 左 Win 键
+VK_RWIN = 0x5C  # 右 Win 键
 
 
 class HotkeyManager:

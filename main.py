@@ -47,7 +47,7 @@ from app.ocr_engine import OCREngine
 from app.translator import Translator
 from app.overlay import OverlayWindow
 from app.region_select import select_region
-from app.hotkeys import HotkeyManager, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11
+from app.hotkeys import HotkeyManager, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_LWIN, VK_RWIN
 from app.textblock import group_lines
 
 
@@ -450,13 +450,19 @@ class App:
             self.start_monitor()
         self.overlay.update_status(self.translator.backend, self.paused)
 
-        self._hotkeys = HotkeyManager({
+        hotkey_bindings = {
             VK_F7: self.set_fullscreen_async,
             VK_F8: self.select_region_async,
             VK_F9: self.toggle_pause,
             VK_F10: self.switch_backend,
             VK_F11: self.toggle_overlay_mode,
-        })
+        }
+        # 屏蔽 Win 键：注册为热键即可吞掉默认行为（开始菜单不再弹出），退出时自动注销恢复
+        if self.config.get("disable_win_key", default=False):
+            hotkey_bindings[VK_LWIN] = lambda: None
+            hotkey_bindings[VK_RWIN] = lambda: None
+            logging.info("Win 键已屏蔽（工具运行期间），退出后自动恢复")
+        self._hotkeys = HotkeyManager(hotkey_bindings)
         self._hotkeys.start()
 
         self.root.mainloop()
