@@ -146,15 +146,11 @@ class RegionMonitor:
             except Exception:
                 continue
             frame = np.asarray(shot)[:, :, :3]
-            small = self._shrink_gray(frame)
+            small = self._gray(frame, self._DIFF_SIZE)
 
             # 与上次已识别画面比对，没变化就不重复识别
-            if self._last_processed_small is not None:
-                diff = float(np.mean(np.abs(
-                    small.astype(np.int16) - self._last_processed_small.astype(np.int16)
-                )))
-                if diff <= self.diff_threshold:
-                    continue
+            if self._last_processed_small is not None and not self._frame_changed(small, self._last_processed_small):
+                continue
             self._last_processed_small = small
 
             self._emit_frame(frame)
@@ -170,16 +166,14 @@ class RegionMonitor:
                 continue
 
             frame = np.asarray(shot)[:, :, :3]          # RGB
-            small = self._shrink_gray(frame)
+            small = self._gray(frame, self._DIFF_SIZE)
 
-            if self._prev_small is not None:
-                diff = float(np.mean(np.abs(small.astype(np.int16) - self._prev_small.astype(np.int16))))
-                if diff > self.diff_threshold:
-                    # 画面发生变化，记录并刷新变化时间
-                    if self._pending_frame is None:
-                        self._pending_since = time.time()
-                    self._pending_frame = frame
-                    self._last_change_time = time.time()
+            if self._prev_small is not None and self._frame_changed(small, self._prev_small):
+                # 画面发生变化，记录并刷新变化时间
+                if self._pending_frame is None:
+                    self._pending_since = time.time()
+                self._pending_frame = frame
+                self._last_change_time = time.time()
 
             self._prev_small = small
 
@@ -226,7 +220,17 @@ class RegionMonitor:
         self._emit_frame(frame_out)
 
     # 变化检测网格（宽 x 高）
-    _GRID = (40, 24)
+    _GRID = (80, 45)
+
+    # 帧差判定参数：320x180 网格逐格比对（全局均值在 4K 屏上检测不到单行文字变化）
+    _DIFF_SIZE = (320, 180)
+    _DIFF_CELL_THRESHOLD = 12   # 单格灰度差超过该值视为变化
+    _DIFF_MIN_RATIO = 0.0015    # 变化格子占比超过 0.15%（约一行文字）即触发
+
+    def _frame_changed(self, a, b):
+        """逐格差分判定画面是否变化（对单行文字变化敏感）"""
+        diff_map = np.abs(a.astype(np.int16) - b.astype(np.int16)).mean(axis=2)
+        return (diff_map > self._DIFF_CELL_THRESHOLD).mean() > self._DIFF_MIN_RATIO
 
     def _change_bbox(self, frame):
         """与上次已识别帧网格级比对，返回变化区域包围盒（全分辨率坐标）"""
@@ -235,8 +239,8 @@ class RegionMonitor:
         if self._prev_emit_small is None:
             return 0, 0, w, h
         diff = np.abs(small.astype(np.int16) - self._prev_emit_small.astype(np.int16)).mean(axis=2)
-        changed = diff > 10
-        if not changed.any():
+        changed = diff > 8
+        if changed.sum() < 2 or changed.mean() > 0.7:
             return 0, 0, w, h
         ys, xs = np.where(changed)
         gx, gy = w / self._GRID[0], h / self._GRID[1]

@@ -1,5 +1,6 @@
-"""翻译模块：Ollama 本地模型 / OpenAI 兼容云 LLM / DeepL 三后端切换 + 结果缓存 + 逐行批量翻译"""
+"""翻译模块：Ollama 本地模型 / OpenAI 兼容云 LLM / DeepL 三后端切换 + 结果缓存 + 逐行并发翻译"""
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -9,18 +10,12 @@ SYSTEM_PROMPT = (
     "Translate the user's English game text into Simplified Chinese. "
     "Output ONLY the translation, no explanations. "
     "Keep game terminology natural and idiomatic. "
+    "Keep the translation concise. "
     "Preserve line breaks of the original text."
 )
 
-# 逐行批量翻译系统提示词（行数必须一致，便于按位置对应显示）
-LINE_PROMPT = (
-    "You are a professional game localization translator. "
-    "Translate each line of English game text into Simplified Chinese. "
-    "Output EXACTLY one translated line per input line, keeping the same order and the same total line count. "
-    "No numbering, no explanations."
-)
-
 REQUEST_TIMEOUT = 30
+PARALLEL_WORKERS = 6  # 逐行并发翻译的线程数
 
 
 class Translator:
@@ -75,9 +70,9 @@ class Translator:
 
     def translate_lines(self, lines):
         """
-        逐行批量翻译（覆盖式翻译用）：返回与 lines 等长的译文列表。
-        命中缓存的行直接返回；其余行拼成一次请求（要求模型保持行数），
-        行数不匹配时逐行回退。
+        逐行并发翻译（覆盖式翻译用）：返回与 lines 等长的译文列表。
+        - 命中缓存的行直接返回（不重复请求）
+        - 其余行并发翻译（总耗时≈单行耗时，比流式输出更快更稳）
         """
         out = [None] * len(lines)
         todo_idx, todo = [], []
@@ -96,24 +91,18 @@ class Translator:
         if not todo:
             return out
 
-        # 尝试批量翻译
-        try:
-            parts = self._dispatch_lines(todo)
-            if len(parts) == len(todo):
-                for i, src, dst in zip(todo_idx, todo, parts):
-                    out[i] = dst
-                    self._remember(src, dst)
-                return out
-        except Exception:
-            pass
-
-        # 回退：逐行单独翻译（慢但稳）
-        for i, src in zip(todo_idx, todo):
+        def work(src):
             try:
-                out[i] = self._dispatch(src, SYSTEM_PROMPT)
-                self._remember(src, out[i])
+                return self._dispatch(src, SYSTEM_PROMPT)
             except Exception as e:
-                out[i] = f"[翻译失败: {e}]"
+                return f"[翻译失败: {e}]"
+
+        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
+            results = list(pool.map(work, todo))
+
+        for i, src, dst in zip(todo_idx, todo, results):
+            out[i] = dst
+            self._remember(src, dst)
         return out
 
     # ---------- 内部工具 ----------
@@ -136,15 +125,6 @@ class Translator:
         if backend == "deepl":
             return self._deepl([text])[0]
         raise RuntimeError(f"未知后端: {backend}")
-
-    def _dispatch_lines(self, lines):
-        """批量翻译：返回与 lines 等长的列表"""
-        if self.backend == "deepl":
-            return self._deepl(lines)
-        # LLM 类后端：按行拼接，要求模型保持行数
-        joined = "\n".join(lines)
-        result = self._dispatch(joined, LINE_PROMPT)
-        return [p.strip() for p in result.split("\n") if p.strip() != ""] or [result]
 
     def _chat(self, url, headers, payload):
         resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
