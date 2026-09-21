@@ -27,6 +27,19 @@ py -V:3.12 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
+### GPU 加速（NVIDIA 显卡，强烈推荐）
+
+CPU 识别一帧约 20 秒，GPU 约 0.7 秒（28 倍）。有 N 卡就装 GPU 版（约 3GB）：
+
+```powershell
+.venv\Scripts\pip uninstall paddlepaddle -y
+.venv\Scripts\pip install paddlepaddle-gpu==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+```
+
+> 注意：CPU 版和 GPU 版会冲突，装 GPU 版前必须先卸载 CPU 版；若卸载顺序错误导致 import 报错，执行
+> `pip install --force-reinstall --no-deps paddlepaddle-gpu==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/` 修复。
+> 验证：`python -c "import paddle; paddle.utils.run_check()"` 输出 "works well on 1 GPU" 即成功。
+
 ## 使用
 
 ```powershell
