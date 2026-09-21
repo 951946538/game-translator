@@ -4,8 +4,9 @@ import os
 # paddlepaddle 3.3 + paddleocr 3.7 在 CPU 推理存在 PIR/mkldnn 不兼容问题，必须关闭
 os.environ.setdefault("FLAGS_use_mkldnn", "false")
 
-# OCR 输入最大宽度（超过则降采样，速度提升约 3 倍，识别率几乎无损）
-MAX_OCR_WIDTH = 1280
+# OCR 输入最大宽度：超过则降采样提速。
+# 高分屏（如 3800x2000）压到 1280 会让小字糊掉导致识别错乱，1920 是精度/速度的平衡点
+MAX_OCR_WIDTH = 1920
 
 
 class OCREngine:

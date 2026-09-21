@@ -82,6 +82,22 @@ class App:
 
         self.overlay_mode = self.config.get("overlay_mode", default="inplace")
         self._build_panel()
+
+        # ---- 屏幕坐标系校准 ----
+        # mss/OCR 使用物理像素；tkinter 在 DPI 感知失败时使用逻辑像素。
+        # 记录两者比例，框选/绘制时统一换算，彻底解决高分屏（如 3800x2000）偏移问题。
+        self.root.update_idletasks()
+        import mss as _mss
+        with _mss.mss() as _sct:
+            _mon = _sct.monitors[1]
+        self._dpi_fx = self.root.winfo_screenwidth() / _mon["width"]
+        self._dpi_fy = self.root.winfo_screenheight() / _mon["height"]
+        logging.info(
+            "屏幕校准: tkinter=%dx%d, mss=%dx%d, 坐标换算系数=(%.3f, %.3f)",
+            self.root.winfo_screenwidth(), self.root.winfo_screenheight(),
+            _mon["width"], _mon["height"], self._dpi_fx, self._dpi_fy,
+        )
+
         self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
 
         # OCR 线程 + 翻译线程（并行流水线），启动即后台预加载模型
@@ -226,10 +242,15 @@ class App:
                     self._last_positioned_key = key
                     translated = self.translator.translate_lines(lines)
                     ox, oy = self._region_offset or (0, 0)
+                    fx, fy = self._dpi_fx, self._dpi_fy  # 物理 → tkinter 画布坐标
                     positioned = [
                         {
-                            "box": [it["box"][0] + ox, it["box"][1] + oy,
-                                    it["box"][2] + ox, it["box"][3] + oy],
+                            "box": [
+                                int((it["box"][0] + ox) * fx),
+                                int((it["box"][1] + oy) * fy),
+                                int((it["box"][2] + ox) * fx),
+                                int((it["box"][3] + oy) * fy),
+                            ],
                             "text": t,
                         }
                         for it, t in zip(payload, translated) if t
@@ -305,8 +326,15 @@ class App:
     def do_select_region(self):
         region = select_region(self.root)
         if region:
-            self.config.region = region
-            self.status_var.set(f"监控中 · 区域 {region}")
+            # 框选坐标是 tkinter 坐标系，统一换算为物理像素存储
+            region_phys = (
+                int(region[0] / self._dpi_fx),
+                int(region[1] / self._dpi_fy),
+                int(region[2] / self._dpi_fx),
+                int(region[3] / self._dpi_fy),
+            )
+            self.config.region = region_phys
+            self.status_var.set(f"监控中 · 区域 {region_phys}")
             self.start_monitor()
             self.overlay.update_status(self.translator.backend, self.paused)
 
