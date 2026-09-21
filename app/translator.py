@@ -18,7 +18,15 @@ REQUEST_TIMEOUT = 30
 class Translator:
     def __init__(self, config):
         self.config = config
-        self.backends = ["ollama", "llm", "deepl"]
+        # 启用的后端从配置读取（config.json 的 enabled_backends）
+        backends = config.get("enabled_backends", default=["llm", "deepl"])
+        self.backends = [b for b in backends if b in ("ollama", "llm", "deepl")] or ["llm"]
+
+        # 当前后端不在启用列表（如旧配置仍是 ollama）→ 回退到第一个可用后端
+        if self.backend not in self.backends:
+            config.set(self.backends[0], "backend")
+            config.save()
+
         self._cache = {}          # 原文 -> 译文
         self._cache_lock = threading.Lock()
         self._last_text = None    # 上一条原文（跳过重复）

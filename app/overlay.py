@@ -38,7 +38,17 @@ class OverlayWindow:
 
         self._place(60, 60)
         self._enable_drag()
+        self._keep_topmost()
         self._hide()
+
+    def _keep_topmost(self):
+        """每 2 秒强制刷新置顶：全屏应用/其他置顶窗口可能抢走置顶属性"""
+        try:
+            self.win.attributes("-topmost", False)
+            self.win.attributes("-topmost", True)
+        except tk.TclError:
+            return  # 窗口已销毁
+        self.win.after(2000, self._keep_topmost)
 
     # ---------- 显示控制 ----------
 

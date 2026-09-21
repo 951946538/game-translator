@@ -51,7 +51,8 @@ py -V:3.12 -m venv .venv
 | `capture_interval_ms` | 截屏间隔，默认 400ms |
 | `diff_threshold` | 帧差灵敏度，越小越灵敏（误触发多），默认 4.0 |
 | `stable_ms` | 画面稳定判定，默认 500ms |
-| `backend` | 当前翻译后端：ollama / llm / deepl |
+| `backend` | 当前翻译后端（须在 enabled_backends 内） |
+| `enabled_backends` | 启用的后端列表，F10 在列表内循环切换；默认已禁用 ollama，恢复本地模型把 `"ollama"` 加回列表即可 |
 | `ollama.model` | 本地模型名，默认 qwen2.5:7b（`ollama pull qwen2.5:7b`） |
 | `llm.*` | OpenAI 兼容云 API：base_url / api_key / model |
 | `deepl.api_key` | DeepL 密钥（免费版以 `:fx` 结尾，自动走免费域名） |

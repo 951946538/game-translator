@@ -11,7 +11,11 @@ DEFAULT_CONFIG = {
     "capture_interval_ms": 400,   # 截屏间隔
     "diff_threshold": 4.0,        # 帧差阈值（均值差，越小越灵敏）
     "stable_ms": 500,             # 画面稳定判定时间（毫秒），变化停止多久后触发 OCR
-    "backend": "ollama",          # 当前翻译后端: ollama / llm / deepl
+    "backend": "llm",             # 当前翻译后端，取值须在 enabled_backends 内
+    "enabled_backends": [         # 启用的后端（F10 在此列表内循环切换）；要恢复本地模型把 "ollama" 加回来即可
+        "llm",
+        "deepl",
+    ],
     "ollama": {
         "url": "http://127.0.0.1:11434",
         "model": "qwen2.5:7b",
