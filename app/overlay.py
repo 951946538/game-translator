@@ -25,11 +25,12 @@ class OverlayWindow:
 
         if mode == "inplace":
             # ===== 覆盖模式：全屏透明画布，译文画在原文坐标上，鼠标完全穿透 =====
+            self._alpha_value = min(cfg.get("opacity", 0.92), 0.95)
             sw = self.win.winfo_screenwidth()
             sh = self.win.winfo_screenheight()
             self.win.geometry(f"{sw}x{sh}+0+0")
             self.win.attributes("-transparentcolor", TRANS_COLOR)
-            self.win.attributes("-alpha", min(cfg.get("opacity", 0.92), 0.95))
+            self.win.attributes("-alpha", self._alpha_value)
             self.win.configure(bg=TRANS_COLOR)
             self.canvas = tk.Canvas(self.win, bg=TRANS_COLOR, highlightthickness=0)
             self.canvas.pack(fill="both", expand=True)
@@ -37,7 +38,8 @@ class OverlayWindow:
                 12, sh - 28, anchor="w", fill="#8a94a6",
                 font=("Microsoft YaHei UI", 9), text="",
             )
-            self._make_clickthrough()
+            # 鼠标穿透必须在窗口映射之后再设置（过早会被 Tk 重置导致点击被拦截）
+            self.win.after(300, self._make_clickthrough)
         else:
             # ===== 面板模式：独立小窗 =====
             self.win.attributes("-alpha", cfg.get("opacity", 0.92))
@@ -73,6 +75,8 @@ class OverlayWindow:
         try:
             self.win.attributes("-topmost", False)
             self.win.attributes("-topmost", True)
+            if self.mode == "inplace":
+                self._make_clickthrough()  # 一并重申鼠标穿透，防止被系统重置
         except tk.TclError:
             return  # 窗口已销毁
         self.win.after(2000, self._keep_topmost)
@@ -116,8 +120,12 @@ class OverlayWindow:
             import ctypes
             hwnd = ctypes.windll.user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
             style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            style |= WS_EX_LAYERED | WS_EX_TRANSPARENT
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            if not (style & WS_EX_TRANSPARENT):
+                style |= WS_EX_LAYERED | WS_EX_TRANSPARENT
+                ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+            # 改完样式必须重申透明属性，否则分层窗口可能不渲染（黑屏遮挡）
+            self.win.attributes("-transparentcolor", TRANS_COLOR)
+            self.win.attributes("-alpha", getattr(self, "_alpha_value", 0.92))
         except Exception:
             pass
 
