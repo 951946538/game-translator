@@ -68,9 +68,11 @@ class App:
         self._last_positioned_key = None  # 覆盖模式去重（与上一帧相同的文本集合不重复翻译）
         self._region_offset = (0, 0)      # 监控区域屏幕偏移（start_monitor 时更新）
 
-        # 队列：监控线程 -> OCR 工作线程 -> UI 主线程
+        # 队列：监控线程 -> OCR 线程 -> 翻译线程 -> UI 主线程（流水线并发）
         self.ocr_queue = queue.Queue()
+        self.translate_queue = queue.Queue()
         self.ui_queue = queue.Queue()
+        self._ocr_lock = threading.Lock()
 
         # ---------- UI ----------
         self.root = tk.Tk()
@@ -82,10 +84,27 @@ class App:
         self._build_panel()
         self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
 
-        # OCR 工作线程
+        # OCR 线程 + 翻译线程（并行流水线），启动即后台预加载模型
         threading.Thread(target=self._ocr_worker, daemon=True).start()
+        threading.Thread(target=self._translate_worker, daemon=True).start()
+        threading.Thread(target=self._preload_ocr, daemon=True).start()
         # UI 队列轮询
         self.root.after(100, self._poll_ui_queue)
+
+    def _preload_ocr(self):
+        """启动时后台预加载 OCR 模型：用户切去游戏的空档完成加载，首次翻译不再等"""
+        with self._ocr_lock:
+            if self.ocr_engine is not None:
+                return
+            try:
+                logging.info("开始预加载 PaddleOCR 模型…")
+                self.ocr_engine = OCREngine(
+                    lang="en",
+                    min_score=self.config.get("ocr_min_score", default=0.6),
+                )
+                logging.info("PaddleOCR 模型加载完成")
+            except Exception:
+                logging.error("OCR 模型预加载失败:\n%s", traceback.format_exc())
 
     # ---------- 控制面板 ----------
 
@@ -153,26 +172,52 @@ class App:
             self.ocr_queue.put(frame)
 
     def _ocr_worker(self):
-        """OCR + 翻译工作线程"""
+        """OCR 线程：丢弃积压旧帧只处理最新，识别结果交给翻译线程（流水线并发）"""
         while True:
             frame = self.ocr_queue.get()
             if frame is None:
                 break
+            # 处理耗时可能超过截屏间隔：丢弃积压旧帧，只处理最新画面
+            while True:
+                try:
+                    frame = self.ocr_queue.get_nowait()
+                except queue.Empty:
+                    break
             try:
-                if self.ocr_engine is None:
-                    self.ui_queue.put(("status", "正在加载 PaddleOCR 模型（首次约 10-30 秒）…"))
-                    self.ocr_engine = OCREngine(
-                        lang="en",
-                        min_score=self.config.get("ocr_min_score", default=0.6),
-                    )
-                    self.ui_queue.put(("status", f"监控中 · {self._region_text(self.config.region)}"))
+                with self._ocr_lock:
+                    if self.ocr_engine is None:
+                        self.ui_queue.put(("status", "正在加载 PaddleOCR 模型（首次约 10-30 秒）…"))
+                        self.ocr_engine = OCREngine(
+                            lang="en",
+                            min_score=self.config.get("ocr_min_score", default=0.6),
+                        )
+                        self.ui_queue.put(("status", f"监控中 · {self._region_text(self.config.region)}"))
 
                 if self.overlay_mode == "inplace":
-                    # ===== 覆盖模式：带坐标识别 + 逐行翻译，译文贴回原文位置 =====
+                    # 覆盖模式：带坐标识别，交给翻译线程
                     items = self.ocr_engine.extract_detail(frame)
-                    if not items:
-                        continue
-                    lines = [it["text"] for it in items]
+                    logging.info("OCR 完成：%d 行", len(items))
+                    if items:
+                        self.translate_queue.put(("positioned", items))
+                else:
+                    # 面板模式：整段识别，交给翻译线程
+                    text = self.ocr_engine.extract(frame)
+                    if text:
+                        self.translate_queue.put(("panel", text))
+            except Exception as e:
+                logging.error("OCR 处理失败:\n%s", traceback.format_exc())
+                self.ui_queue.put(("status", f"处理失败: {e}"))
+
+    def _translate_worker(self):
+        """翻译线程：与 OCR 并行（OCR 占 CPU、翻译走网络，互不抢占）"""
+        while True:
+            item = self.translate_queue.get()
+            if item is None:
+                break
+            kind, payload = item
+            try:
+                if kind == "positioned":
+                    lines = [it["text"] for it in payload]
                     key = "\n".join(lines)
                     if key == self._last_positioned_key:
                         continue
@@ -185,20 +230,17 @@ class App:
                                     it["box"][2] + ox, it["box"][3] + oy],
                             "text": t,
                         }
-                        for it, t in zip(items, translated) if t
+                        for it, t in zip(payload, translated) if t
                     ]
                     if positioned:
+                        logging.info("翻译完成：%d 行", len(positioned))
                         self.ui_queue.put(("positioned", positioned))
                 else:
-                    # ===== 面板模式：整段识别翻译 =====
-                    text = self.ocr_engine.extract(frame)
-                    if not text:
-                        continue
-                    translated = self.translator.translate(text)
+                    translated = self.translator.translate(payload)
                     if translated is not None:
-                        self.ui_queue.put(("translation", text, translated))
+                        self.ui_queue.put(("translation", payload, translated))
             except Exception as e:
-                logging.error("OCR/翻译处理失败:\n%s", traceback.format_exc())
+                logging.error("翻译处理失败:\n%s", traceback.format_exc())
                 self.ui_queue.put(("status", f"处理失败: {e}"))
 
     # ---------- UI 队列消费 ----------
@@ -310,6 +352,7 @@ class App:
     def on_close(self):
         self.stop_monitor()
         self.ocr_queue.put(None)
+        self.translate_queue.put(None)
         self.config.save()
         self.root.destroy()
 

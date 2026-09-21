@@ -99,6 +99,7 @@ class RegionMonitor:
                         self._pending_since = now
 
     def _emit(self):
+        logging.info("画面变化，触发识别")
         frame_out = self._pending_frame
         self._pending_frame = None
         try:
