@@ -1,8 +1,13 @@
 """译文悬浮窗：panel（独立小窗）/ inplace（译文覆盖在原文位置上，沉浸式）"""
 import tkinter as tk
 
-# inplace 模式的全透明色（该颜色的像素完全透明且鼠标可穿透）
+# inplace 模式的全透明色（该颜色的像素完全透明）
 TRANS_COLOR = "#010101"
+
+# Windows 扩展样式
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020  # 鼠标事件完全穿透
 
 
 class OverlayWindow:
@@ -19,7 +24,7 @@ class OverlayWindow:
         self.pad = cfg.get("pad", 6)  # 覆盖块向外扩大的像素数
 
         if mode == "inplace":
-            # ===== 覆盖模式：全屏透明画布，译文画在原文坐标上 =====
+            # ===== 覆盖模式：全屏透明画布，译文画在原文坐标上，鼠标完全穿透 =====
             sw = self.win.winfo_screenwidth()
             sh = self.win.winfo_screenheight()
             self.win.geometry(f"{sw}x{sh}+0+0")
@@ -32,6 +37,7 @@ class OverlayWindow:
                 12, sh - 28, anchor="w", fill="#8a94a6",
                 font=("Microsoft YaHei UI", 9), text="",
             )
+            self._make_clickthrough()
         else:
             # ===== 面板模式：独立小窗 =====
             self.win.attributes("-alpha", cfg.get("opacity", 0.92))
@@ -104,9 +110,20 @@ class OverlayWindow:
 
     # ---------- 覆盖模式 ----------
 
+    def _make_clickthrough(self):
+        """给覆盖窗口加鼠标穿透：所有点击直达下层游戏窗口"""
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style |= WS_EX_LAYERED | WS_EX_TRANSPARENT
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        except Exception:
+            pass
+
     def update_positioned(self, items):
         """
-        覆盖模式：译文块画在原文坐标上。
+        覆盖模式：译文块从上到下直接盖在原文坐标上。
         items: [{"box": [x1,y1,x2,y2], "text": 译文}, ...]
         """
         if self.mode != "inplace":
@@ -118,19 +135,20 @@ class OverlayWindow:
             font=("Microsoft YaHei UI", 9), text=self._status_text,
         )
 
-        for item in items:
+        # 从上到下、从左到右绘制
+        for item in sorted(items, key=lambda it: (it["box"][1], it["box"][0])):
             x1, y1, x2, y2 = item["box"]
             text = item["text"]
             if not text:
                 continue
             pad = self.pad
-            # 背景块盖住原文（向下多扩 50%：中文译文字数通常少于英文，但按钮艺术字下缘常超出检测框）
+            # 背景块直接盖住原文（向下多扩 50%，兜住按钮艺术字下缘）
             extra_bottom = int((y2 - y1) * 0.5)
             self.canvas.create_rectangle(
                 x1 - pad, y1 - pad, x2 + pad, y2 + pad + extra_bottom,
                 fill="#14141f", outline="",
             )
-            # 字号随原文行高自适应（中文比英文宽，适当放大区域）
+            # 字号随原文行高自适应
             line_h = max(y2 - y1, 14)
             font_size = max(10, min(int(line_h * 0.82), 22))
             self.canvas.create_text(
