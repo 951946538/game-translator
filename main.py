@@ -5,8 +5,18 @@
 热键：F7 全屏模式 | F8 重新选区 | F9 暂停/恢复 | F10 切换翻译后端
 """
 import sys
+import os
+import logging
 import threading
 import queue
+import traceback
+
+# 日志写入文件，便于排查问题
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game-translator.log")
+logging.basicConfig(
+    filename=LOG_FILE, level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8",
+)
 
 # Windows 控制台中文输出
 if sys.platform == "win32":
@@ -130,6 +140,7 @@ class App:
                 if translated is not None:
                     self.ui_queue.put(("translation", text, translated))
             except Exception as e:
+                logging.error("OCR/翻译处理失败:\n%s", traceback.format_exc())
                 self.ui_queue.put(("status", f"处理失败: {e}"))
 
     # ---------- UI 队列消费 ----------

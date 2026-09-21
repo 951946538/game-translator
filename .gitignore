@@ -3,7 +3,7 @@
 
 # 运行生成
 config.json
-pip-install*.log
+*.log
 
 # 模型缓存
 .paddleocr/

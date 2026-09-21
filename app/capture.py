@@ -1,6 +1,8 @@
 """区域截屏与变化检测：只在画面内容稳定变化后才触发回调，避免重复翻译"""
+import logging
 import threading
 import time
+import traceback
 
 import mss
 import numpy as np
@@ -85,8 +87,8 @@ class RegionMonitor:
                     self._pending_frame = None
                     try:
                         self.on_stable(frame_out)
-                    except Exception as e:
-                        print(f"[capture] 回调异常: {e}")
+                    except Exception:
+                        logging.error("监控回调异常:\n%s", traceback.format_exc())
 
     @staticmethod
     def _shrink_gray(frame, size=(160, 90)):
