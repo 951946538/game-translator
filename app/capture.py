@@ -16,7 +16,7 @@ class RegionMonitor:
     3. 稳定后回调 on_stable(pil_image)
     """
 
-    def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable):
+    def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500):
         if region == "fullscreen":
             # 全屏模式：监控主显示器整屏
             with mss.mss() as sct:
@@ -28,6 +28,7 @@ class RegionMonitor:
         self.interval = interval_ms / 1000
         self.diff_threshold = diff_threshold
         self.stable_ms = stable_ms
+        self.force_ocr_ms = force_ocr_ms  # 持续变化（滚动/打字机）超过该时长后按最新帧强制识别
         self.on_stable = on_stable
 
         self.paused = False
@@ -37,6 +38,7 @@ class RegionMonitor:
         self._prev_small = None       # 上一帧缩略灰度图（用于差分）
         self._pending_frame = None    # 变化后等待稳定的帧
         self._last_change_time = 0.0
+        self._pending_since = 0.0     # 待处理帧的起始时间（用于滚动兜底）
 
     # ---------- 生命周期 ----------
 
@@ -73,22 +75,34 @@ class RegionMonitor:
                     diff = float(np.mean(np.abs(small.astype(np.int16) - self._prev_small.astype(np.int16))))
                     if diff > self.diff_threshold:
                         # 画面发生变化，记录并刷新变化时间
+                        if self._pending_frame is None:
+                            self._pending_since = time.time()
                         self._pending_frame = frame
                         self._last_change_time = time.time()
 
                 self._prev_small = small
 
-                # 有待处理帧且画面已稳定
-                if (
-                    self._pending_frame is not None
-                    and (time.time() - self._last_change_time) * 1000 >= self.stable_ms
-                ):
-                    frame_out = self._pending_frame
-                    self._pending_frame = None
-                    try:
-                        self.on_stable(frame_out)
-                    except Exception:
-                        logging.error("监控回调异常:\n%s", traceback.format_exc())
+                if self._pending_frame is not None:
+                    now = time.time()
+                    since_change_ms = (now - self._last_change_time) * 1000
+                    since_pending_ms = (now - self._pending_since) * 1000
+
+                    if since_change_ms >= self.stable_ms:
+                        # 画面已稳定：正常触发
+                        self._emit()
+                    elif since_pending_ms >= self.force_ocr_ms:
+                        # 内容持续变化（滚动/打字机效果）：
+                        # 按最新帧强制识别，并重置计时按此间隔节流
+                        self._emit()
+                        self._pending_since = now
+
+    def _emit(self):
+        frame_out = self._pending_frame
+        self._pending_frame = None
+        try:
+            self.on_stable(frame_out)
+        except Exception:
+            logging.error("监控回调异常:\n%s", traceback.format_exc())
 
     @staticmethod
     def _shrink_gray(frame, size=(160, 90)):

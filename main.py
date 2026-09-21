@@ -123,6 +123,7 @@ class App:
             diff_threshold=self.config.get("diff_threshold", default=4.0),
             stable_ms=self.config.get("stable_ms", default=500),
             on_stable=self._on_stable_frame,
+            force_ocr_ms=self.config.get("force_ocr_ms", default=2500),
         )
         self.monitor.start()
 
@@ -220,11 +221,15 @@ class App:
         self.root.after(0, self.do_set_fullscreen)
 
     def do_set_fullscreen(self):
-        """全屏模式：监控整个主屏，无需框选（全屏游戏建议用无边框窗口模式）"""
+        """全屏模式：监控整个主屏，无需框选（全屏游戏建议用无边框窗口模式）
+        全屏默认使用覆盖原文显示"""
         self.config.region = "fullscreen"
         self.status_var.set("监控中 · 全屏模式")
         self.start_monitor()
-        self.overlay.update_status(self.translator.backend, self.paused)
+        if self.overlay_mode != "inplace":
+            self._do_toggle_overlay_mode()  # 全屏自动切覆盖原文
+        else:
+            self.overlay.update_status(self.translator.backend, self.paused)
 
     @staticmethod
     def _region_text(region):
