@@ -221,13 +221,13 @@ class App:
                         self.ui_queue.put(("status", f"监控中 · {self._region_text(self.config.region)}"))
 
                 if self.overlay_mode == "inplace":
-                    # 覆盖模式：带坐标识别 + 行合并为逻辑段落（保证换行长句的翻译上下文完整）
+                    # 覆盖模式：带坐标识别 + 按文本框面板归组（保证换行长句的翻译上下文完整）
                     items = self.ocr_engine.extract_detail(frame)
+                    blocks = group_lines(items, frame=frame)
                     ox, oy = origin
-                    for it in items:
-                        b = it["box"]
-                        it["box"] = [b[0] + ox, b[1] + oy, b[2] + ox, b[3] + oy]
-                    blocks = group_lines(items)
+                    for b in blocks:
+                        bx = b["box"]
+                        b["box"] = [bx[0] + ox, bx[1] + oy, bx[2] + ox, bx[3] + oy]
                     logging.info("OCR 完成：%d 行合并为 %d 个文本块", len(items), len(blocks))
                     if blocks:
                         self.translate_queue.put(("positioned", blocks))
