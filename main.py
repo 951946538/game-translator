@@ -29,6 +29,18 @@ if sys.platform == "win32":
 import tkinter as tk
 from tkinter import scrolledtext
 
+# 关键：开启进程 DPI 感知，让 tkinter 使用物理像素坐标，
+# 与截屏/OCR 的物理像素坐标一致（否则 125%/150% 缩放下覆盖位置整体偏移）
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
 from app.config import Config
 from app.capture import RegionMonitor
 from app.ocr_engine import OCREngine
@@ -54,6 +66,7 @@ class App:
         self.monitor = None
         self.paused = False
         self._last_positioned_key = None  # 覆盖模式去重（与上一帧相同的文本集合不重复翻译）
+        self._region_offset = (0, 0)      # 监控区域屏幕偏移（start_monitor 时更新）
 
         # 队列：监控线程 -> OCR 工作线程 -> UI 主线程
         self.ocr_queue = queue.Queue()
@@ -125,6 +138,8 @@ class App:
             on_stable=self._on_stable_frame,
             force_ocr_ms=self.config.get("force_ocr_ms", default=2500),
         )
+        # 记录区域在屏幕上的偏移，覆盖模式绘制时把 OCR 相对坐标转换为屏幕绝对坐标
+        self._region_offset = self.monitor.offset
         self.monitor.start()
 
     def stop_monitor(self):
@@ -160,8 +175,13 @@ class App:
                         continue
                     self._last_positioned_key = key
                     translated = self.translator.translate_lines(lines)
+                    ox, oy = self._region_offset or (0, 0)
                     positioned = [
-                        {"box": it["box"], "text": t}
+                        {
+                            "box": [it["box"][0] + ox, it["box"][1] + oy,
+                                    it["box"][2] + ox, it["box"][3] + oy],
+                            "text": t,
+                        }
                         for it, t in zip(items, translated) if t
                     ]
                     if positioned:

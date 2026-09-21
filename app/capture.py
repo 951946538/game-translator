@@ -25,6 +25,8 @@ class RegionMonitor:
                            "width": mon["width"], "height": mon["height"]}
         else:
             self.region = {"left": region[0], "top": region[1], "width": region[2], "height": region[3]}
+        # 监控区域在屏幕上的偏移（OCR 坐标是相对区域的，绘制时要加回该偏移）
+        self.offset = (self.region["left"], self.region["top"])
         self.interval = interval_ms / 1000
         self.diff_threshold = diff_threshold
         self.stable_ms = stable_ms
