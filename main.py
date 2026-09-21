@@ -156,6 +156,8 @@ class App:
             stable_ms=self.config.get("stable_ms", default=500),
             on_stable=self._on_stable_frame,
             force_ocr_ms=self.config.get("force_ocr_ms", default=2500),
+            trigger_mode=self.config.get("trigger_mode", default="input"),
+            input_idle_ms=self.config.get("input_idle_ms", default=3000),
         )
         # 记录区域在屏幕上的偏移，覆盖模式绘制时把 OCR 相对坐标转换为屏幕绝对坐标
         self._region_offset = self.monitor.offset
@@ -353,6 +355,10 @@ class App:
         self.stop_monitor()
         self.ocr_queue.put(None)
         self.translate_queue.put(None)
+        try:
+            self._mouse_listener.stop()
+        except Exception:
+            pass
         self.config.save()
         self.root.destroy()
 
@@ -372,7 +378,20 @@ class App:
         )
         hotkeys.start()
 
+        # 全局鼠标监听：点击/滚轮作为翻译触发信号（输入触发模式）
+        from pynput import mouse
+        self._mouse_listener = mouse.Listener(
+            on_click=lambda *args: self._notify_input(),
+            on_scroll=lambda *args: self._notify_input(),
+        )
+        self._mouse_listener.start()
+
         self.root.mainloop()
+
+    def _notify_input(self):
+        """点击/滚轮回调：通知监控线程有输入活动"""
+        if self.monitor and not self.paused:
+            self.monitor.notify_input()
 
 
 if __name__ == "__main__":

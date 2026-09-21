@@ -8,7 +8,9 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 # 默认配置（首次运行生成 config.json，用户可自行修改）
 DEFAULT_CONFIG = {
     "region": None,               # 监控区域 [x, y, w, h]，None 表示尚未选择
-    "capture_interval_ms": 400,   # 截屏间隔
+    "capture_interval_ms": 400,   # 截屏间隔（帧差模式用）
+    "trigger_mode": "input",      # 触发模式：input 点击/滚轮停止3秒后识别 / diff 持续帧差
+    "input_idle_ms": 3000,        # 输入触发模式：停止操作多久后识别
     "diff_threshold": 4.0,        # 帧差阈值（均值差，越小越灵敏）
     "stable_ms": 500,             # 画面稳定判定时间（毫秒），变化停止多久后触发 OCR
     "force_ocr_ms": 2500,         # 滚动兜底：内容持续变化超过该时长，按最新帧强制识别

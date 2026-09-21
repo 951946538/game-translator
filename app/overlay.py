@@ -8,6 +8,8 @@ TRANS_COLOR = "#010101"
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020  # 鼠标事件完全穿透
+LWA_COLORKEY = 0x00000001
+LWA_ALPHA = 0x00000002
 
 
 class OverlayWindow:
@@ -115,7 +117,10 @@ class OverlayWindow:
     # ---------- 覆盖模式 ----------
 
     def _make_clickthrough(self):
-        """给覆盖窗口加鼠标穿透：所有点击直达下层游戏窗口"""
+        """给覆盖窗口加鼠标穿透：所有点击直达下层游戏窗口。
+        必须直接调用 SetLayeredWindowAttributes 重设透明色+透明度——
+        Tk 认为属性已设置不会重调 API，改样式后窗口会停止渲染（译文不显示的根因）。
+        """
         try:
             import ctypes
             hwnd = ctypes.windll.user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
@@ -123,9 +128,12 @@ class OverlayWindow:
             if not (style & WS_EX_TRANSPARENT):
                 style |= WS_EX_LAYERED | WS_EX_TRANSPARENT
                 ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-            # 改完样式必须重申透明属性，否则分层窗口可能不渲染（黑屏遮挡）
-            self.win.attributes("-transparentcolor", TRANS_COLOR)
-            self.win.attributes("-alpha", getattr(self, "_alpha_value", 0.92))
+            # 直接重设：透明色 #010101 (COLORREF=0x010101) + 窗口透明度，双标志
+            colorkey = 0x010101
+            alpha = int(getattr(self, "_alpha_value", 0.92) * 255)
+            ctypes.windll.user32.SetLayeredWindowAttributes(
+                hwnd, colorkey, alpha, LWA_COLORKEY | LWA_ALPHA,
+            )
         except Exception:
             pass
 

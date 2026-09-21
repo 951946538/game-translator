@@ -16,7 +16,8 @@ class RegionMonitor:
     3. 稳定后回调 on_stable(pil_image)
     """
 
-    def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500):
+    def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500,
+                 trigger_mode="input", input_idle_ms=3000):
         if region == "fullscreen":
             # 全屏模式：监控主显示器整屏
             with mss.mss() as sct:
@@ -27,6 +28,8 @@ class RegionMonitor:
             self.region = {"left": region[0], "top": region[1], "width": region[2], "height": region[3]}
         # 监控区域在屏幕上的偏移（OCR 坐标是相对区域的，绘制时要加回该偏移）
         self.offset = (self.region["left"], self.region["top"])
+        self.trigger_mode = trigger_mode      # input: 输入触发 / diff: 持续帧差
+        self.input_idle_ms = input_idle_ms    # 输入触发模式：停止操作多久后识别
         self.interval = interval_ms / 1000
         self.diff_threshold = diff_threshold
         self.stable_ms = stable_ms
@@ -41,6 +44,9 @@ class RegionMonitor:
         self._pending_frame = None    # 变化后等待稳定的帧
         self._last_change_time = 0.0
         self._pending_since = 0.0     # 待处理帧的起始时间（用于滚动兜底）
+        self._last_input = 0.0        # 最近一次点击/滚轮时间（输入触发模式）
+        self._input_pending = False
+        self._last_processed_small = None  # 上次已识别画面的缩略图
 
     # ---------- 生命周期 ----------
 
@@ -57,12 +63,56 @@ class RegionMonitor:
         self.paused = False
         self._prev_small = None  # 恢复时重置基准，避免暂停期间的画面变化误判
 
+    def notify_input(self):
+        """全局点击/滚轮回调：记录输入活动时间（输入触发模式用）"""
+        if not self.paused:
+            self._last_input = time.time()
+            self._input_pending = True
+
     # ---------- 内部逻辑 ----------
 
     def _loop(self):
         with mss.mss() as sct:
-            while not self._stop.is_set():
-                time.sleep(self.interval)
+            if self.trigger_mode == "input":
+                self._input_loop(sct)
+            else:
+                self._diff_loop(sct)
+
+    def _input_loop(self, sct):
+        """
+        输入触发模式：点击/滚轮停止 input_idle_ms（默认3秒）后识别一次。
+        画面与上次识别相比没有变化则跳过。
+        适合游戏场景：内容变化几乎都由操作触发，无需持续截屏。
+        """
+        while not self._stop.is_set():
+            time.sleep(0.3)
+            if self.paused or not self._input_pending:
+                continue
+            if (time.time() - self._last_input) * 1000 < self.input_idle_ms:
+                continue  # 还在连续操作中，等停下来
+            self._input_pending = False
+
+            try:
+                shot = sct.grab(self.region)
+            except Exception:
+                continue
+            frame = np.asarray(shot)[:, :, :3]
+            small = self._shrink_gray(frame)
+
+            # 与上次已识别画面比对，没变化就不重复识别
+            if self._last_processed_small is not None:
+                diff = float(np.mean(np.abs(
+                    small.astype(np.int16) - self._last_processed_small.astype(np.int16)
+                )))
+                if diff <= self.diff_threshold:
+                    continue
+            self._last_processed_small = small
+
+            self._emit_frame(frame)
+
+    def _diff_loop(self, sct):
+        while not self._stop.is_set():
+            time.sleep(self.interval)
                 if self.paused:
                     continue
                 try:
@@ -97,6 +147,13 @@ class RegionMonitor:
                         # 按最新帧强制识别，并重置计时按此间隔节流
                         self._emit()
                         self._pending_since = now
+
+    def _emit_frame(self, frame):
+        logging.info("触发识别")
+        try:
+            self.on_stable(frame)
+        except Exception:
+            logging.error("监控回调异常:\n%s", traceback.format_exc())
 
     def _emit(self):
         logging.info("画面变化，触发识别")
