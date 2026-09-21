@@ -28,7 +28,7 @@ if sys.platform == "win32":
         pass
 
 import tkinter as tk
-from tkinter import scrolledtext  # noqa: F401（保留依赖声明，当前未使用）
+from tkinter import scrolledtext
 
 # 关键：开启进程 DPI 感知，让 tkinter 使用物理像素坐标，
 # 与截屏/OCR 的物理像素坐标一致（否则 125%/150% 缩放下覆盖位置整体偏移）
@@ -48,8 +48,9 @@ from app.ocr_engine import OCREngine
 from app.translator import Translator
 from app.overlay import OverlayWindow
 from app.region_select import select_region
-from app.hotkeys import HotkeyManager, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_LWIN, VK_RWIN
+from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_LWIN, VK_RWIN
 from app.textblock import group_lines
+from app import vision
 
 
 class App:
@@ -84,7 +85,7 @@ class App:
         # ---------- UI ----------
         self.root = tk.Tk()
         self.root.title("游戏实时翻译")
-        self.root.geometry("420x280")
+        self.root.geometry("800x360")
         self.root.attributes("-topmost", True)  # 控制面板永久置顶，方便实时操作
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -137,28 +138,39 @@ class App:
     # ---------- 控制面板 ----------
 
     def _build_panel(self):
+        main_frame = tk.Frame(self.root)
+        main_frame.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # ===== 左列：状态 + 操作 =====
+        left = tk.Frame(main_frame)
+        left.pack(side="left", fill="y", padx=(0, 10))
+
         # 大字状态（翻译流程实时提示）
         self.big_status_var = tk.StringVar(value="等待选择区域\n按 F7 捕获游戏窗口")
         self.big_status = tk.Label(
-            self.root, textvariable=self.big_status_var,
-            font=("Microsoft YaHei UI", 16, "bold"), fg="#409eff",
+            left, textvariable=self.big_status_var,
+            font=("Microsoft YaHei UI", 15, "bold"), fg="#409eff",
         )
-        self.big_status.pack(pady=(16, 4))
+        self.big_status.pack(pady=(8, 4))
 
         # 详细状态行
         self.status_var = tk.StringVar(value="")
-        tk.Label(self.root, textvariable=self.status_var, fg="#888", font=("Microsoft YaHei UI", 9)).pack(pady=2)
+        tk.Label(left, textvariable=self.status_var, fg="#888", font=("Microsoft YaHei UI", 9)).pack(pady=2)
 
         # 按钮区（两行）
-        btns = tk.Frame(self.root)
+        btns = tk.Frame(left)
         btns.pack(pady=10)
+        self.vision_btn = tk.Button(
+            btns, text="截图直译 (F5)", command=self.vision_translate_async,
+            bg="#7c3aed", fg="white", activebackground="#8b5cf6",
+        )
+        self.vision_btn.grid(row=0, column=0, padx=3, pady=2)
         self.trigger_btn = tk.Button(
             btns, text="立即翻译 (F6)", command=self.trigger_now_async,
             bg="#2d6a4f", fg="white", activebackground="#40916c",
         )
-        self.trigger_btn.grid(row=0, column=0, padx=3, pady=2)
-        tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=1, padx=3, pady=2)
-        tk.Button(btns, text="框选区域 (F8)", command=lambda: self.select_region_async()).grid(row=0, column=2, padx=3, pady=2)
+        self.trigger_btn.grid(row=0, column=1, padx=3, pady=2)
+        tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=2, padx=3, pady=2)
 
         self.pause_btn = tk.Button(btns, text="暂停 (F9)", command=self.toggle_pause)
         self.pause_btn.grid(row=1, column=0, padx=3, pady=2)
@@ -168,6 +180,18 @@ class App:
         self.mode_btn.grid(row=1, column=2, padx=3, pady=2)
         self._refresh_backend_btn()
         self._refresh_mode_btn()
+
+        # ===== 右列：截图直译输出 =====
+        right = tk.Frame(main_frame)
+        right.pack(side="right", fill="both", expand=True)
+        tk.Label(
+            right, text="截图直译（F5：整屏发给视觉模型，按阅读顺序输出）",
+            font=("Microsoft YaHei UI", 9, "bold"), fg="#7c3aed", anchor="w",
+        ).pack(fill="x", pady=(0, 2))
+        self.vision_output = scrolledtext.ScrolledText(
+            right, font=("Microsoft YaHei UI", 10), wrap="word", state="disabled",
+        )
+        self.vision_output.pack(fill="both", expand=True)
 
     # ---------- 状态提示 ----------
 
@@ -358,6 +382,11 @@ class App:
                 elif kind == "positioned":
                     _, positioned = item
                     self.overlay.update_positioned(positioned)
+                elif kind == "vision_result":
+                    self.vision_output.configure(state="normal")
+                    self.vision_output.delete("1.0", "end")
+                    self.vision_output.insert("1.0", item[1])
+                    self.vision_output.configure(state="disabled")
         except queue.Empty:
             pass
         self.root.after(100, self._poll_ui_queue)
@@ -374,6 +403,33 @@ class App:
         # 手动翻译不依赖 UI 线程，直接在热键线程执行
         if self.monitor:
             self.monitor.capture_now()
+
+    def vision_translate_async(self):
+        """截图直译（F5）：整屏截图直接发给视觉模型，译文显示在右侧面板"""
+        if self.monitor:
+            threading.Thread(target=self._vision_worker, daemon=True).start()
+
+    def _vision_worker(self):
+        try:
+            import numpy as np
+            import mss as _mss
+            _MSS = getattr(_mss, "MSS", _mss.mss)
+
+            self.ui_queue.put(("stage", "⟳ 截图发送中…"))
+            with _MSS() as sct:
+                shot = sct.grab(self.monitor.region)
+            frame = np.asarray(shot)[:, :, :3]
+
+            self.ui_queue.put(("stage", "⟳ 视觉模型翻译中…"))
+            logging.info("截图直译：发送 %dx%d 给视觉模型", frame.shape[1], frame.shape[0])
+            text = vision.translate_screenshot(frame, self.config)
+
+            self.ui_queue.put(("vision_result", text))
+            self.ui_queue.put(("stage_done", None))
+            logging.info("截图直译完成：%d 字", len(text))
+        except Exception as e:
+            logging.error("截图直译失败:\n%s", traceback.format_exc())
+            self.ui_queue.put(("vision_result", f"[截图直译失败: {e}]"))
 
     def _get_foreground_rect(self):
         """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。
@@ -522,6 +578,7 @@ class App:
         self.overlay.update_status(self.translator.backend, self.paused)
 
         hotkey_bindings = {
+            VK_F5: self.vision_translate_async,
             VK_F6: self.trigger_now_async,
             VK_F7: self.set_fullscreen_async,
             VK_F8: self.select_region_async,

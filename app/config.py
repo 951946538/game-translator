@@ -33,6 +33,11 @@ DEFAULT_CONFIG = {
         "api_key": "",
         "model": "deepseek-chat",
     },
+    "vision": {                   # 截图直译（视觉模型，F5）；api_key 留空复用 llm 段
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "",
+        "model": "deepseek-v4-flash-vision-exp",
+    },
     "deepl": {
         "api_key": "",            # DeepL 免费版密钥，形如 xxx:fx
     },
