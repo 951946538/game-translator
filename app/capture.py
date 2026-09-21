@@ -122,38 +122,40 @@ class RegionMonitor:
             if self.paused:
                 continue
 
-            # ---- 输入检测（零钩子开销） ----
-            tick = last_input_tick()
-            pos = cursor_pos()
-            if any_button_down():
-                self._last_input = time.time()
-                self._input_pending = True
-            elif tick != prev_tick and pos == prev_pos:
-                # 有新输入但光标没动：滚轮或键盘
-                self._last_input = time.time()
-                self._input_pending = True
-            prev_tick, prev_pos = tick, pos
-
-            # ---- 静置判定 ----
-            if not self._input_pending:
-                continue
-            if (time.time() - self._last_input) * 1000 < self.input_idle_ms:
-                continue  # 还在连续操作中，等停下来
-            self._input_pending = False
-
             try:
+                # ---- 输入检测（零钩子开销） ----
+                tick = last_input_tick()
+                pos = cursor_pos()
+                if any_button_down():
+                    self._last_input = time.time()
+                    self._input_pending = True
+                elif tick != prev_tick and pos == prev_pos:
+                    # 有新输入但光标没动：滚轮或键盘
+                    self._last_input = time.time()
+                    self._input_pending = True
+                prev_tick, prev_pos = tick, pos
+
+                # ---- 静置判定 ----
+                if not self._input_pending:
+                    continue
+                if (time.time() - self._last_input) * 1000 < self.input_idle_ms:
+                    continue  # 还在连续操作中，等停下来
+                self._input_pending = False
+
                 shot = sct.grab(self.region)
+                frame = np.asarray(shot)[:, :, :3]
+                small = self._gray(frame, self._DIFF_SIZE)
+
+                # 与上次已识别画面比对，没变化就不重复识别
+                if self._last_processed_small is not None and not self._frame_changed(small, self._last_processed_small):
+                    continue
+                self._last_processed_small = small
+
+                self._emit_frame(frame)
             except Exception:
-                continue
-            frame = np.asarray(shot)[:, :, :3]
-            small = self._gray(frame, self._DIFF_SIZE)
-
-            # 与上次已识别画面比对，没变化就不重复识别
-            if self._last_processed_small is not None and not self._frame_changed(small, self._last_processed_small):
-                continue
-            self._last_processed_small = small
-
-            self._emit_frame(frame)
+                # 任何异常都不允许杀死监控线程
+                logging.error("输入监控循环异常:\n%s", traceback.format_exc())
+                time.sleep(1)
 
     def _diff_loop(self, sct):
         while not self._stop.is_set():
@@ -162,34 +164,36 @@ class RegionMonitor:
                 continue
             try:
                 shot = sct.grab(self.region)
+
+                frame = np.asarray(shot)[:, :, :3]          # RGB
+                small = self._gray(frame, self._DIFF_SIZE)
+
+                if self._prev_small is not None and self._frame_changed(small, self._prev_small):
+                    # 画面发生变化，记录并刷新变化时间
+                    if self._pending_frame is None:
+                        self._pending_since = time.time()
+                    self._pending_frame = frame
+                    self._last_change_time = time.time()
+
+                self._prev_small = small
+
+                if self._pending_frame is not None:
+                    now = time.time()
+                    since_change_ms = (now - self._last_change_time) * 1000
+                    since_pending_ms = (now - self._pending_since) * 1000
+
+                    if since_change_ms >= self.stable_ms:
+                        # 画面已稳定：正常触发
+                        self._emit()
+                    elif since_pending_ms >= self.force_ocr_ms:
+                        # 内容持续变化（滚动/打字机效果）：
+                        # 按最新帧强制识别，并重置计时按此间隔节流
+                        self._emit()
+                        self._pending_since = now
             except Exception:
-                continue
-
-            frame = np.asarray(shot)[:, :, :3]          # RGB
-            small = self._gray(frame, self._DIFF_SIZE)
-
-            if self._prev_small is not None and self._frame_changed(small, self._prev_small):
-                # 画面发生变化，记录并刷新变化时间
-                if self._pending_frame is None:
-                    self._pending_since = time.time()
-                self._pending_frame = frame
-                self._last_change_time = time.time()
-
-            self._prev_small = small
-
-            if self._pending_frame is not None:
-                now = time.time()
-                since_change_ms = (now - self._last_change_time) * 1000
-                since_pending_ms = (now - self._pending_since) * 1000
-
-                if since_change_ms >= self.stable_ms:
-                    # 画面已稳定：正常触发
-                    self._emit()
-                elif since_pending_ms >= self.force_ocr_ms:
-                    # 内容持续变化（滚动/打字机效果）：
-                    # 按最新帧强制识别，并重置计时按此间隔节流
-                    self._emit()
-                    self._pending_since = now
+                # 任何异常都不允许杀死监控线程
+                logging.error("帧差监控循环异常:\n%s", traceback.format_exc())
+                time.sleep(1)
 
     def _emit_frame(self, frame):
         """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）"""
@@ -228,8 +232,8 @@ class RegionMonitor:
     _DIFF_MIN_RATIO = 0.0015    # 变化格子占比超过 0.15%（约一行文字）即触发
 
     def _frame_changed(self, a, b):
-        """逐格差分判定画面是否变化（对单行文字变化敏感）"""
-        diff_map = np.abs(a.astype(np.int16) - b.astype(np.int16)).mean(axis=2)
+        """逐格差分判定画面是否变化（a/b 为二维灰度图，对单行文字变化敏感）"""
+        diff_map = np.abs(a.astype(np.int16) - b.astype(np.int16))
         return (diff_map > self._DIFF_CELL_THRESHOLD).mean() > self._DIFF_MIN_RATIO
 
     def _change_bbox(self, frame):
@@ -238,7 +242,7 @@ class RegionMonitor:
         small = self._gray(frame, self._GRID)
         if self._prev_emit_small is None:
             return 0, 0, w, h
-        diff = np.abs(small.astype(np.int16) - self._prev_emit_small.astype(np.int16)).mean(axis=2)
+        diff = np.abs(small.astype(np.int16) - self._prev_emit_small.astype(np.int16))
         changed = diff > 8
         if changed.sum() < 2 or changed.mean() > 0.7:
             return 0, 0, w, h
