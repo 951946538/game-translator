@@ -142,6 +142,8 @@ class OverlayWindow:
             if not text:
                 continue
             pad = self.pad
+            # 水平额外扩展 3%：检测框常略窄于视觉文字（行尾残留问题）
+            pad_x = pad + int((x2 - x1) * 0.03)
             # 背景块直接盖住原文（向下多扩 50%，兜住按钮艺术字下缘）
             extra_bottom = int((y2 - y1) * 0.5)
             self.canvas.create_rectangle(
