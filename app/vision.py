@@ -1,5 +1,4 @@
-"""截图直译：整张游戏截图直接发给视觉大模型（DeepSeek-V4-Flash-Vision），流式输出译文。
-与 OCR 链路互补：不需要坐标的场景（公告/剧情整屏阅读）质量远超 OCR。"""
+"""视觉/对话模块：截图直译 + 直接问 AI（可选附带游戏画面），全部流式输出。"""
 import base64
 import json
 import logging
@@ -25,31 +24,17 @@ def encode_screenshot(frame_rgb, max_width=2048, quality=82):
     return base64.b64encode(buf).decode("ascii")
 
 
-def translate_screenshot_stream(frame_rgb, cfg):
-    """流式截图直译：逐块 yield ("reasoning"|"content", 增量文本)。
-    vision 段未配置 api_key 时复用 llm 段。"""
-    base_url = cfg.get("vision", "base_url", default="") or cfg.get("llm", "base_url", default="")
-    api_key = cfg.get("vision", "api_key", default="") or cfg.get("llm", "api_key", default="")
-    model = cfg.get("vision", "model", default="deepseek-v4-flash-vision-exp")
+def _stream_chat(model, messages, cfg, section="llm"):
+    """通用流式对话：逐块 yield ("reasoning"|"content", 增量文本)"""
+    base_url = cfg.get(section, "base_url", default="") or cfg.get("llm", "base_url", default="")
+    api_key = cfg.get(section, "api_key", default="") or cfg.get("llm", "api_key", default="")
     if not api_key:
         raise RuntimeError("未配置 api_key（config.json 的 llm 或 vision 段）")
 
-    b64 = encode_screenshot(frame_rgb)
     resp = requests.post(
         f"{base_url.rstrip('/')}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": model,
-            "temperature": 0.3,
-            "stream": True,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": VISION_PROMPT},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            }],
-        },
+        json={"model": model, "temperature": 0.3, "stream": True, "messages": messages},
         stream=True,
         timeout=REQUEST_TIMEOUT,
     )
@@ -73,3 +58,37 @@ def translate_screenshot_stream(frame_rgb, cfg):
         c = delta.get("content")
         if c:
             yield ("content", c)
+
+
+def translate_screenshot_stream(frame_rgb, cfg):
+    """流式截图直译：整张截图发给视觉模型按阅读顺序翻译"""
+    b64 = encode_screenshot(frame_rgb)
+    model = cfg.get("vision", "model", default="deepseek-v4-flash-vision-exp")
+    yield from _stream_chat(
+        model,
+        [{"role": "user", "content": [
+            {"type": "text", "text": VISION_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]}],
+        cfg, section="vision",
+    )
+
+
+def ask_stream(question, frame_rgb, cfg, with_image=False):
+    """流式问 AI：with_image=True 时把当前游戏截图一并交给视觉模型，
+    可回答"画面里这个按钮是什么"这类问题；否则纯文本走 llm 模型。"""
+    if with_image and frame_rgb is not None:
+        model = cfg.get("vision", "model", default="deepseek-v4-flash-vision-exp")
+        b64 = encode_screenshot(frame_rgb)
+        content = [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]
+        yield from _stream_chat(
+            model, [{"role": "user", "content": content}], cfg, section="vision",
+        )
+    else:
+        model = cfg.get("llm", "model", default="deepseek-chat")
+        yield from _stream_chat(
+            model, [{"role": "user", "content": question}], cfg, section="llm",
+        )

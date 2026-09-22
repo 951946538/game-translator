@@ -85,6 +85,19 @@ def _is_own_ui_text(text):
     return norm == ""
 
 
+# ---------- UI 主题（深色） ----------
+UI_BG = "#1e1e2e"        # 窗口底色
+UI_PANEL = "#181825"     # 卡片/记录底色
+UI_INPUT = "#313244"     # 输入框/按钮底色
+UI_INPUT_ACTIVE = "#45475a"
+UI_TEXT = "#cdd6f4"      # 主文字
+UI_TEXT_DIM = "#6c7086"  # 次要文字
+UI_ACCENT = "#89b4fa"    # 强调蓝（状态）
+UI_GREEN = "#a6e3a1"
+UI_PURPLE = "#cba6f7"
+UI_FONT = "Microsoft YaHei UI"
+
+
 class App:
     window_ids = []  # 本工具所有窗口的 winfo_id（用于 F7 排除自身窗口）
 
@@ -118,7 +131,8 @@ class App:
         # ---------- UI ----------
         self.root = tk.Tk()
         self.root.title("游戏实时翻译")
-        self.root.geometry("1100x440")
+        self.root.geometry("1120x500")
+        self.root.configure(bg=UI_BG)
         self.root.attributes("-topmost", True)  # 控制面板永久置顶，方便实时操作
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -171,62 +185,105 @@ class App:
     # ---------- 控制面板 ----------
 
     def _build_panel(self):
-        main_frame = tk.Frame(self.root)
-        main_frame.pack(fill="both", expand=True, padx=8, pady=8)
+        main_frame = tk.Frame(self.root, bg=UI_BG)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
         # ===== 左列：状态 + 操作 =====
-        left = tk.Frame(main_frame)
-        left.pack(side="left", fill="y", padx=(0, 10))
+        left = tk.Frame(main_frame, bg=UI_BG)
+        left.pack(side="left", fill="y", padx=(0, 12))
 
         # 大字状态（翻译流程实时提示）
         self.big_status_var = tk.StringVar(value="等待选择区域\n按 F7 捕获游戏窗口")
         self.big_status = tk.Label(
-            left, textvariable=self.big_status_var,
-            font=("Microsoft YaHei UI", 15, "bold"), fg="#409eff",
+            left, textvariable=self.big_status_var, bg=UI_BG,
+            font=(UI_FONT, 15, "bold"), fg=UI_ACCENT,
         )
-        self.big_status.pack(pady=(8, 4))
+        self.big_status.pack(pady=(10, 4))
 
         # 详细状态行
         self.status_var = tk.StringVar(value="")
-        tk.Label(left, textvariable=self.status_var, fg="#888", font=("Microsoft YaHei UI", 9)).pack(pady=2)
+        tk.Label(
+            left, textvariable=self.status_var, bg=UI_BG,
+            fg=UI_TEXT_DIM, font=(UI_FONT, 9),
+        ).pack(pady=2)
 
         # 按钮区（两行）
-        btns = tk.Frame(left)
-        btns.pack(pady=10)
+        btns = tk.Frame(left, bg=UI_BG)
+        btns.pack(pady=12)
+        btn_cfg = dict(
+            bg=UI_INPUT, fg=UI_TEXT, activebackground=UI_INPUT_ACTIVE,
+            activeforeground="white", bd=0, pady=5, cursor="hand2",
+        )
         self.vision_btn = tk.Button(
-            btns, text="截图直译 (F5)", command=self.vision_translate_async,
+            btns, text="截图直译 F5", command=self.vision_translate_async,
             bg="#7c3aed", fg="white", activebackground="#8b5cf6",
+            bd=0, pady=5, cursor="hand2",
         )
-        self.vision_btn.grid(row=0, column=0, padx=3, pady=2)
+        self.vision_btn.grid(row=0, column=0, padx=3, pady=3, sticky="ew")
         self.trigger_btn = tk.Button(
-            btns, text="立即翻译 (F6)", command=self.trigger_now_async,
+            btns, text="立即翻译 F6", command=self.trigger_now_async,
             bg="#2d6a4f", fg="white", activebackground="#40916c",
+            bd=0, pady=5, cursor="hand2",
         )
-        self.trigger_btn.grid(row=0, column=1, padx=3, pady=2)
-        tk.Button(btns, text="游戏窗口 (F7)", command=self.set_fullscreen_async).grid(row=0, column=2, padx=3, pady=2)
+        self.trigger_btn.grid(row=0, column=1, padx=3, pady=3, sticky="ew")
+        tk.Button(
+            btns, text="游戏窗口 F7", command=self.set_fullscreen_async,
+            bg="#2563eb", fg="white", activebackground="#3b82f6",
+            bd=0, pady=5, cursor="hand2",
+        ).grid(row=0, column=2, padx=3, pady=3, sticky="ew")
 
         self.pause_btn = tk.Button(
-            btns, text="恢复 (F9)" if self.paused else "暂停 (F9)", command=self.toggle_pause,
+            btns, text="恢复 (F9)" if self.paused else "暂停 (F9)",
+            command=self.toggle_pause, **btn_cfg,
         )
-        self.pause_btn.grid(row=1, column=0, padx=3, pady=2)
-        self.mode_btn = tk.Button(btns, text="", command=self.toggle_overlay_mode)
-        self.mode_btn.grid(row=1, column=1, padx=3, pady=2)
+        self.pause_btn.grid(row=1, column=0, padx=3, pady=3, sticky="ew")
+        self.mode_btn = tk.Button(btns, text="", command=self.toggle_overlay_mode, **btn_cfg)
+        self.mode_btn.grid(row=1, column=1, padx=3, pady=3, sticky="ew")
+        tk.Button(btns, text="框选区域 F8", command=self.select_region_async, **btn_cfg).grid(
+            row=1, column=2, padx=3, pady=3, sticky="ew",
+        )
         self._refresh_mode_btn()
 
-        # ===== 右列：截图直译历史（每条 = 时间 + 截图缩略图 + 完整输出） =====
-        right = tk.Frame(main_frame)
+        # ===== 右列：问 AI 输入条 + 输出历史 =====
+        right = tk.Frame(main_frame, bg=UI_BG)
         right.pack(side="right", fill="both", expand=True)
+
+        # 问 AI 输入条
+        ask_bar = tk.Frame(right, bg=UI_BG)
+        ask_bar.pack(fill="x", pady=(0, 6))
+        self.ask_entry_var = tk.StringVar()
+        self.ask_entry = tk.Entry(
+            ask_bar, textvariable=self.ask_entry_var,
+            bg=UI_INPUT, fg=UI_TEXT, insertbackground="white",
+            bd=0, relief="flat", font=(UI_FONT, 11),
+        )
+        self.ask_entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 6))
+        self.ask_entry.bind("<Return>", lambda e: self.ask_ai_async())
+        self.with_image_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            ask_bar, text="带画面", variable=self.with_image_var,
+            bg=UI_BG, fg=UI_TEXT_DIM, selectcolor=UI_INPUT,
+            activebackground=UI_BG, activeforeground=UI_TEXT, bd=0,
+            font=(UI_FONT, 9),
+        ).pack(side="right", padx=(6, 0))
+        tk.Button(
+            ask_bar, text="提问", command=self.ask_ai_async,
+            bg="#2563eb", fg="white", activebackground="#3b82f6",
+            bd=0, pady=4, padx=14, cursor="hand2", font=(UI_FONT, 10, "bold"),
+        ).pack(side="right")
+
+        # 输出历史（截图直译 / 问 AI 混合，每条 = 时间 + 缩略图 + 输出）
         tk.Label(
-            right, text="截图直译（F5：整屏发给视觉模型，含思考过程）",
-            font=("Microsoft YaHei UI", 9, "bold"), fg="#7c3aed", anchor="w",
+            right, text="输出历史（F5 截图直译 · 提问回答）",
+            font=(UI_FONT, 9, "bold"), fg=UI_PURPLE, anchor="w", bg=UI_BG,
         ).pack(fill="x", pady=(0, 2))
 
-        self.vision_canvas = tk.Canvas(right, highlightthickness=0)
+        self.vision_canvas = tk.Canvas(right, highlightthickness=0, bg=UI_BG)
         vsb = ttk.Scrollbar(right, orient="vertical", command=self.vision_canvas.yview)
         self.vision_canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
         self.vision_canvas.pack(side="left", fill="both", expand=True)
-        self.vision_inner = tk.Frame(self.vision_canvas)
+        self.vision_inner = tk.Frame(self.vision_canvas, bg=UI_BG)
         self._vision_win = self.vision_canvas.create_window((0, 0), window=self.vision_inner, anchor="nw")
         self.vision_inner.bind(
             "<Configure>",
@@ -246,12 +303,13 @@ class App:
             "<MouseWheel>", lambda ev: self.vision_canvas.yview_scroll(int(-ev.delta / 120), "units")))
         widget.bind("<Leave>", lambda e: widget.unbind_all("<MouseWheel>"))
 
-    def _vision_record_start(self, thumb):
-        """新增一条截图直译记录骨架（时间戳 + 截图缩略图 + 空输出区），
+    def _vision_record_start(self, thumb, title="截图直译", prefix=""):
+        """新增一条输出记录骨架（时间戳 + 标题 + 可选缩略图 + 空输出区），
         正文由后续 vision_delta 流式追加（打字机效果）"""
         from PIL import ImageTk
 
-        rec = tk.Frame(self.vision_inner, bd=1, relief="groove")
+        rec = tk.Frame(self.vision_inner, bg=UI_PANEL, bd=0, highlightthickness=1,
+                       highlightbackground=UI_INPUT)
         if self._vision_first is None:
             rec.pack(fill="x", pady=5, padx=2)
             self._vision_first = rec
@@ -259,22 +317,25 @@ class App:
             rec.pack(fill="x", pady=5, padx=2, before=self._vision_first)
 
         tk.Label(
-            rec, text=f"🕐 {datetime.now().strftime('%H:%M:%S')} 截图直译",
-            font=("Microsoft YaHei UI", 9, "bold"), fg="#7c3aed", anchor="w",
-        ).pack(fill="x", padx=6, pady=(4, 2))
+            rec, text=f"🕐 {datetime.now().strftime('%H:%M:%S')}  {title}",
+            font=(UI_FONT, 9, "bold"), fg=UI_PURPLE, anchor="w", bg=UI_PANEL,
+        ).pack(fill="x", padx=8, pady=(6, 3))
 
         if thumb is not None:
             photo = ImageTk.PhotoImage(thumb)
-            lbl = tk.Label(rec, image=photo, bd=0)
+            lbl = tk.Label(rec, image=photo, bd=0, bg=UI_PANEL)
             lbl.image = photo  # 持有引用防 GC 回收
-            lbl.pack(padx=6, pady=2)
+            lbl.pack(padx=8, pady=3)
             self._bind_wheel(lbl)
 
         body = tk.Text(
-            rec, font=("Microsoft YaHei UI", 10), wrap="word", bd=0,
-            bg="#faf9ff", padx=6, pady=4, height=6,
+            rec, font=(UI_FONT, 10), wrap="word", bd=0,
+            bg=UI_PANEL, fg=UI_TEXT, padx=8, pady=6, height=6,
+            insertbackground="white",
         )
-        body.pack(fill="x", padx=4, pady=(0, 4))
+        if prefix:
+            body.insert("end", prefix)
+        body.pack(fill="x", padx=6, pady=(0, 6))
         self._bind_wheel(body)
         self._vision_body = body  # vision_delta 持续往这里追加
 
@@ -509,7 +570,11 @@ class App:
                     _, positioned = item
                     self.overlay.update_positioned(positioned)
                 elif kind == "vision_start":
-                    self._vision_record_start(item[1])
+                    self._vision_record_start(item[1], title="截图直译")
+                elif kind == "ask_start":
+                    _, question, thumb = item
+                    self._vision_record_start(thumb, title="问 AI", prefix=f"❓ {question}\n\n")
+                    self._vision_body.see("end")
                 elif kind == "vision_delta":
                     body = getattr(self, "_vision_body", None)
                     if body is not None:
@@ -545,6 +610,57 @@ class App:
         """截图直译（F5）：整屏截图直接发给视觉模型，译文显示在右侧面板"""
         if self.monitor:
             threading.Thread(target=self._vision_worker, daemon=True).start()
+
+    def ask_ai_async(self):
+        """问 AI：输入框的问题发给 LLM（可勾选附带当前游戏画面给视觉模型）"""
+        question = (self.ask_entry_var.get() or "").strip()
+        if not question:
+            self.ask_entry.focus_set()
+            return
+        self.ask_entry_var.set("")
+        threading.Thread(target=self._ask_worker, args=(question,), daemon=True).start()
+
+    def _ask_worker(self, question):
+        try:
+            from PIL import Image
+            with_image = self.with_image_var.get()
+
+            thumb = None
+            if with_image and self.monitor:
+                self.ui_queue.put(("stage", "⟳ 截图发送中…"))
+                frame = self.monitor.clean_grab()
+                if frame is not None:
+                    thumb = Image.fromarray(frame)
+                    tw = 340
+                    if thumb.width > tw:
+                        thumb = thumb.resize((tw, max(1, round(thumb.height * tw / thumb.width))))
+            else:
+                frame = None
+
+            self.ui_queue.put(("stage", "⟳ AI 回答中…"))
+            self.ui_queue.put(("ask_start", question, thumb))
+
+            got_reasoning = got_content = False
+            for kind, chunk in vision.ask_stream(question, frame, self.config, with_image):
+                if kind == "reasoning":
+                    if not got_reasoning:
+                        got_reasoning = True
+                        self.ui_queue.put(("vision_delta", "──── 思考过程 ────\n"))
+                    self.ui_queue.put(("vision_delta", chunk))
+                else:
+                    if not got_content:
+                        got_content = True
+                        if got_reasoning:
+                            self.ui_queue.put(("vision_delta", "\n\n──── 回答 ────\n"))
+                    self.ui_queue.put(("vision_delta", chunk))
+
+            self.ui_queue.put(("vision_done", None))
+            self.ui_queue.put(("stage_done", None))
+            logging.info("问 AI 完成（%s）", "带画面" if with_image else "纯文本")
+        except Exception as e:
+            logging.error("问 AI 失败:\n%s", traceback.format_exc())
+            self.ui_queue.put(("vision_delta", f"\n[问 AI 失败: {e}]"))
+            self.ui_queue.put(("vision_done", None))
 
     def _vision_worker(self):
         try:
