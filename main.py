@@ -13,8 +13,11 @@ import threading
 import queue
 import traceback
 
-# 日志写入文件，便于排查问题
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game-translator.log")
+# 日志写入文件，便于排查问题（打包后放在 exe 旁边）
+if getattr(sys, "frozen", False):
+    LOG_FILE = os.path.join(os.path.dirname(sys.executable), "game-translator.log")
+else:
+    LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game-translator.log")
 logging.basicConfig(
     filename=LOG_FILE, level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8",
@@ -971,4 +974,28 @@ class App:
 
 
 if __name__ == "__main__":
-    App().run()
+    if "--selftest" in sys.argv:
+        # 打包后自测：验证 paddle GPU / OCR 引擎 / 凭据管理器可用，结果写日志
+        logging.info("=== 自测开始 ===")
+        try:
+            import paddle
+            logging.info("paddle %s, CUDA: %s", paddle.__version__, paddle.device.is_compiled_with_cuda())
+        except Exception:
+            logging.error("paddle 导入失败:\n%s", traceback.format_exc())
+        try:
+            from app.ocr_engine import OCREngine
+            OCREngine(lang="en", min_score=0.6, high_accuracy=False)
+            logging.info("OCR 引擎初始化成功")
+        except Exception:
+            logging.error("OCR 引擎初始化失败:\n%s", traceback.format_exc())
+        try:
+            from app import secrets
+            secrets.set_api_key("selftest-ok")
+            ok = secrets.get_api_key() == "selftest-ok"
+            secrets.delete_api_key()
+            logging.info("凭据管理器: %s", "可用" if ok else "不可用")
+        except Exception:
+            logging.error("凭据管理器失败:\n%s", traceback.format_exc())
+        logging.info("=== 自测结束，详见同目录 game-translator.log ===")
+    else:
+        App().run()

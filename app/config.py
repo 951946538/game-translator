@@ -2,9 +2,16 @@
 import json
 import logging
 import os
+import sys
 import threading
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
+# 打包后（PyInstaller）config.json 放在 exe 旁边；源码运行时放项目根目录
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 # 默认配置（首次运行生成 config.json，用户可自行修改）
 DEFAULT_CONFIG = {
