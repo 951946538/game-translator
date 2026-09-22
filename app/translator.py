@@ -100,7 +100,7 @@ class Translator:
     def _llm(self, text, system):
         """OpenAI 兼容接口（DeepSeek / GLM / 通义等）"""
         base_url = self.config.get("llm", "base_url", default="").rstrip("/")
-        api_key = self.config.get("llm", "api_key", default="")
+        api_key = self.config.get_api_key("llm")
         model = self.config.get("llm", "model", default="")
         if not api_key:
             raise RuntimeError("未配置 llm.api_key（config.json）")

@@ -165,6 +165,97 @@ class App:
         threading.Thread(target=self._preload_ocr, daemon=True).start()
         # UI 队列轮询
         self.root.after(100, self._poll_ui_queue)
+        # 首次启动未配置密钥：弹出设置窗口（分发给朋友时各自填写自己的密钥）
+        self.root.after(400, self._check_api_config)
+
+    # ---------- API 设置（密钥存 Windows 凭据管理器） ----------
+
+    def _check_api_config(self):
+        if not self.config.get_api_key("llm"):
+            self.show_settings_dialog()
+
+    def show_settings_dialog(self):
+        import webbrowser
+
+        win = tk.Toplevel(self.root)
+        win.title("API 设置")
+        win.configure(bg=UI_BG, padx=18, pady=14)
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+
+        tk.Label(
+            win, text="配置 DeepSeek API", font=(UI_FONT, 13, "bold"),
+            fg=UI_ACCENT, bg=UI_BG,
+        ).pack(anchor="w", pady=(0, 4))
+        tk.Label(
+            win, text="密钥仅保存在本机 Windows 凭据管理器，不写入任何文件。",
+            fg=UI_TEXT_DIM, bg=UI_BG, font=(UI_FONT, 9),
+        ).pack(anchor="w", pady=(0, 8))
+        tk.Button(
+            win, text="① 打开 DeepSeek 平台注册并创建密钥 →",
+            command=lambda: webbrowser.open("https://platform.deepseek.com/api_keys"),
+            bg=UI_INPUT, fg=UI_TEXT, activebackground=UI_INPUT_ACTIVE,
+            activeforeground="white", bd=0, pady=4, cursor="hand2", anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        def field(label, default="", show=""):
+            tk.Label(win, text=label, fg=UI_TEXT, bg=UI_BG, font=(UI_FONT, 10)).pack(anchor="w")
+            var = tk.StringVar(value=default)
+            tk.Entry(
+                win, textvariable=var, show=show, bg=UI_INPUT, fg=UI_TEXT,
+                insertbackground="white", bd=0, relief="flat", font=(UI_FONT, 10), width=44,
+            ).pack(fill="x", ipady=5, pady=(3, 8))
+            return var
+
+        url_var = field("API 地址（OpenAI 兼容）", self.config.get("llm", "base_url", default="https://api.deepseek.com/v1"))
+        key_var = field("API 密钥", show="•")
+
+        def save():
+            key = key_var.get().strip()
+            if not key:
+                win.destroy()
+                return
+            if url_var.get().strip():
+                self.config.set(url_var.get().strip(), "llm", "base_url")
+            self.config.set_api_key(key, "llm")
+            self.config.save()
+            self.status_var.set("API 密钥已保存到 Windows 凭据管理器")
+            win.destroy()
+
+        bar = tk.Frame(win, bg=UI_BG)
+        bar.pack(fill="x", pady=(4, 0))
+        tk.Button(bar, text="取消", command=win.destroy, bg=UI_INPUT, fg=UI_TEXT,
+                  activebackground=UI_INPUT_ACTIVE, activeforeground="white", bd=0,
+                  pady=4, padx=12, cursor="hand2").pack(side="right", padx=(6, 0))
+        tk.Button(bar, text="保存", command=save, bg="#2563eb", fg="white",
+                  activebackground="#3b82f6", bd=0, pady=4, padx=16, cursor="hand2").pack(side="right")
+
+    def show_help(self):
+        import webbrowser
+
+        win = tk.Toplevel(self.root)
+        win.title("使用说明")
+        win.configure(bg=UI_BG, padx=18, pady=14)
+        win.transient(self.root)
+        win.grab_set()
+        text = (
+            "快速上手：\n"
+            "  1. 点「API 设置」填入自己的 DeepSeek 密钥（存在本机凭据管理器）\n"
+            "  2. 打开游戏，点击一下游戏画面，按 F7 捕获游戏窗口\n"
+            "  3. 按 F6 立即翻译（译文盖在原文上）；F5 截图直译（整屏发给视觉模型）\n"
+            "  4. 右侧输入框可直接向 AI 提问，勾选「带画面」可结合当前游戏画面\n\n"
+            "热键：F5 截图直译 | F6 立即翻译 | F7 游戏窗口 | F8 框选区域\n"
+            "      F9 暂停/恢复自动翻译 | F11 覆盖原文/独立面板\n\n"
+            "密钥获取：platform.deepseek.com 注册后创建 API Key"
+        )
+        tk.Label(win, text=text, justify="left", fg=UI_TEXT, bg=UI_BG,
+                 font=(UI_FONT, 10)).pack(anchor="w")
+        tk.Button(
+            win, text="打开 DeepSeek 平台", command=lambda: webbrowser.open("https://platform.deepseek.com/api_keys"),
+            bg=UI_INPUT, fg=UI_TEXT, activebackground=UI_INPUT_ACTIVE, activeforeground="white",
+            bd=0, pady=4, cursor="hand2",
+        ).pack(pady=(10, 0))
 
     def _preload_ocr(self):
         """启动时后台预加载 OCR 模型：用户切去游戏的空档完成加载，首次翻译不再等"""
@@ -243,6 +334,14 @@ class App:
             row=1, column=2, padx=3, pady=3, sticky="ew",
         )
         self._refresh_mode_btn()
+
+        # API 设置（密钥存 Windows 凭据管理器，分发给他人时各自填写）
+        tk.Button(
+            btns, text="API 设置", command=self.show_settings_dialog, **btn_cfg,
+        ).grid(row=2, column=0, padx=3, pady=3, sticky="ew")
+        tk.Button(
+            btns, text="使用说明", command=self.show_help, **btn_cfg,
+        ).grid(row=2, column=1, padx=3, pady=3, sticky="ew")
 
         # ===== 右列：问 AI 输入条 + 输出历史 =====
         right = tk.Frame(main_frame, bg=UI_BG)

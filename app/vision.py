@@ -25,11 +25,12 @@ def encode_screenshot(frame_rgb, max_width=2048, quality=82):
 
 
 def _stream_chat(model, messages, cfg, section="llm"):
-    """通用流式对话：逐块 yield ("reasoning"|"content", 增量文本)"""
+    """通用流式对话：逐块 yield ("reasoning"|"content", 增量文本)。
+    密钥优先读 Windows 凭据管理器，vision 段没有时复用 llm 段。"""
     base_url = cfg.get(section, "base_url", default="") or cfg.get("llm", "base_url", default="")
-    api_key = cfg.get(section, "api_key", default="") or cfg.get("llm", "api_key", default="")
+    api_key = cfg.get_api_key(section) or (cfg.get_api_key("llm") if section != "llm" else "")
     if not api_key:
-        raise RuntimeError("未配置 api_key（config.json 的 llm 或 vision 段）")
+        raise RuntimeError("未配置 API 密钥（请在设置窗口中填写，保存于 Windows 凭据管理器）")
 
     resp = requests.post(
         f"{base_url.rstrip('/')}/chat/completions",

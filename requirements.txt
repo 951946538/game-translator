@@ -5,3 +5,4 @@ mss>=9.0
 numpy
 Pillow
 requests
+keyring>=24.0        # API 密钥存 Windows 凭据管理器（分发场景各自填写）

@@ -1,5 +1,6 @@
 """配置加载与保存（config.json）"""
 import json
+import logging
 import os
 import threading
 
@@ -69,6 +70,31 @@ class Config:
                 return default
             node = node[k]
         return node
+
+    def get_api_key(self, section="llm"):
+        """读取 API 密钥：优先 Windows 凭据管理器；
+        兼容旧版 config.json 中的明文密钥——读取后自动迁移到凭据管理器并清除明文"""
+        from app import secrets
+        key = secrets.get_api_key(section)
+        if key:
+            return key
+        key = self.get(section, "api_key", default="") or ""
+        if key:
+            if secrets.set_api_key(key, section):
+                self.set("", section, "api_key")  # 清除明文
+                self.save()
+                logging.info("已将 %s 密钥从 config.json 迁移到凭据管理器", section)
+            return key
+        return ""
+
+    def set_api_key(self, key, section="llm"):
+        """保存密钥到凭据管理器，并确保 config.json 中无明文残留"""
+        from app import secrets
+        ok = secrets.set_api_key(key, section)
+        if self.get(section, "api_key", default=""):
+            self.set("", section, "api_key")
+            self.save()
+        return ok
 
     def set(self, value, *keys):
         with self._lock:
