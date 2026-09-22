@@ -350,21 +350,25 @@ class RegionMonitor:
 
     def _emit_frame(self, frame, force=False):
         """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）。
-        force=True 表示 F6 手动触发（暂停状态下也执行，且不受节流限制）。"""
+        force=True 表示 F6 手动触发：整帧识别（配合主程序清空旧译文，完整重建当前画面的翻译）。"""
         now = time.time()
         if not force and now - self._last_emit_time < self.min_interval:
             return  # 自动翻译节流兜底（input 模式/边界场景）；F6 手动触发不受限
         self._last_emit_time = now
         h, w = frame.shape[:2]
-        x0, y0, x1, y1 = self._change_bbox(frame)
-        margin = 24
-        x0 = max(0, x0 - margin)
-        y0 = max(0, y0 - margin)
-        x1 = min(w, x1 + margin)
-        y1 = min(h, y1 + margin)
-        # 变化区域过大（转场/换页）或异常时退化为整帧
-        if x1 <= x0 or y1 <= y0 or (x1 - x0) * (y1 - y0) > 0.75 * w * h:
+        if force:
+            # 手动触发：整帧识别——旧译文已被清空，必须重新翻译整个画面
             x0, y0, x1, y1 = 0, 0, w, h
+        else:
+            x0, y0, x1, y1 = self._change_bbox(frame)
+            margin = 24
+            x0 = max(0, x0 - margin)
+            y0 = max(0, y0 - margin)
+            x1 = min(w, x1 + margin)
+            y1 = min(h, y1 + margin)
+            # 变化区域过大（转场/换页）或异常时退化为整帧
+            if x1 <= x0 or y1 <= y0 or (x1 - x0) * (y1 - y0) > 0.75 * w * h:
+                x0, y0, x1, y1 = 0, 0, w, h
 
         self._prev_emit_small = self._gray(frame, self._GRID)
         crop = frame[y0:y1, x0:x1]

@@ -374,6 +374,12 @@ class App:
         """监控线程回调：画面稳定，交给 OCR 队列（frame 为变化区域裁剪，origin 为其屏幕坐标）。
         force=True 为 F6 手动触发，暂停状态下依然执行。"""
         if not self.paused or force:
+            if force:
+                # 手动翻译 = 翻译当前画面：清空旧译文（避免场景切换后残留），
+                # 立即刷新覆盖层（识别为空时也能清掉残留），重置去重键允许重译相同文本
+                self._positioned_history = []
+                self._last_positioned_key = None
+                self.ui_queue.put(("positioned", []))
             self.ui_queue.put(("stage", "⟳ 正在识别…"))
             self.ocr_queue.put((frame, origin))
 
