@@ -7,7 +7,9 @@ import requests
 # 整段翻译系统提示词
 SYSTEM_PROMPT = (
     "You are a professional game localization translator. "
-    "Translate the user's English game text into Simplified Chinese. "
+    "Translate the user's game text into Simplified Chinese, regardless of the source "
+    "language (English, Japanese, Korean, or any other). "
+    "Text already in Simplified Chinese should be output as-is. "
     "Output ONLY the translation, no explanations. "
     "Keep game terminology natural and idiomatic. "
     "Keep the translation concise. "
