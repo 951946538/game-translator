@@ -117,6 +117,7 @@ class App:
         self._webview_hwnd = 0
         self._docked = None               # 当前贴边侧（None/“left”/“right”）
         self._saved_win_rect = None       # 收缩前窗口位置尺寸（展开恢复用）
+        self._panel_expanded = False      # 主面板右侧区域展开态（默认收起，悬停展开）
         self.config = Config()
         self.translator = Translator(self.config)
 
@@ -180,6 +181,8 @@ class App:
         threading.Thread(target=self._preload_ocr, daemon=True).start()
         # 贴边收缩监视：轮询主窗口位置（不依赖拖动回调，任何方式贴边都能触发）
         threading.Thread(target=self._edge_watch_loop, daemon=True).start()
+        # 主面板置顶保持
+        threading.Thread(target=self._keep_on_top_loop, daemon=True).start()
         self.root.after(100, self._poll_ui_queue)
 
     def _preload_ocr(self):
@@ -734,6 +737,43 @@ class App:
         self._bridge.push("docked", {"side": None})
         logging.info("窗口已展开")
 
+    # ---------- 主面板宽窄切换（右侧区域 hover 展开） ----------
+
+    PANEL_WIDE_W = 1180    # 展开态：左列 + 右侧历史/提问区
+    PANEL_COMPACT_W = 348  # 收起态：仅左列，右缘显示触发竖条
+
+    def _expand_panel(self, expanded):
+        """切换主面板宽窄（左上角位置不变，宽度向右伸缩）"""
+        if not self._win_provider or expanded == getattr(self, "_panel_expanded", None):
+            return
+        try:
+            import ctypes
+            import ctypes.wintypes
+            win = self._win_provider()
+            x, y, h = 120, 120, 620
+            if self._webview_hwnd:
+                user32 = ctypes.windll.user32
+                rect = ctypes.wintypes.RECT()
+                if user32.GetWindowRect(self._webview_hwnd, ctypes.byref(rect)):
+                    x, y, h = rect.left, rect.top, rect.bottom - rect.top
+            win.resize(self.PANEL_WIDE_W if expanded else self.PANEL_COMPACT_W, h)
+            win.move(x, y)
+            self._panel_expanded = expanded
+            logging.info("主面板%s", "展开" if expanded else "收起")
+        except Exception:
+            logging.error("面板宽窄切换失败:\n%s", traceback.format_exc())
+
+    def _keep_on_top_loop(self):
+        """每 5 秒重申 webview 主面板置顶（全屏游戏等会抢走置顶属性）"""
+        while True:
+            time.sleep(5)
+            try:
+                win = self._win_provider()
+                if win:
+                    win.on_top(True)
+            except Exception:
+                pass
+
     # ---------- 生命周期 ----------
 
     def on_close(self):
@@ -825,7 +865,8 @@ def main():
     ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
     win = webview.create_window(
         "游戏实时翻译", ui_path, js_api=api,
-        width=1180, height=620, min_size=(860, 480),
+        width=App.PANEL_COMPACT_W, height=620,  # 默认收起态（右侧区域悬停展开）
+        min_size=(330, 420),
         frameless=True,  # 无边框：标题栏由 HTML 自绘；拖动用 pywebview 自带 easy_drag
         background_color="#14141f",
     )

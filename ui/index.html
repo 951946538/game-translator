@@ -81,6 +81,26 @@
   body.docked #dockTab { display: flex; }
   body.docked #dockTab:hover { filter: brightness(1.2); }
 
+  /* ===== 收起态（窗口窄）：右侧区域隐藏，右缘触发竖条 ===== */
+  body.compact main .right { display: none; }
+  body.compact .btn-grid { grid-template-columns: repeat(2, 1fr); }
+  body.compact .stage-text { font-size: 14px; }
+  #edgeTrigger {
+    display: none; position: fixed; right: 0; top: 0; bottom: 0; width: 20px;
+    background: linear-gradient(180deg, rgba(124,58,237,.85), rgba(37,99,235,.85));
+    align-items: center; justify-content: center; cursor: pointer; z-index: 50;
+    writing-mode: vertical-rl; letter-spacing: 4px; color: #fff; font-size: 12px;
+    box-shadow: -3px 0 12px rgba(0,0,0,.35);
+  }
+  body.compact #edgeTrigger { display: flex; }
+  #edgeTrigger:hover { filter: brightness(1.25); }
+  #edgeTrigger .new-dot {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    width: 8px; height: 8px; border-radius: 50%; background: #f38ba8;
+    animation: pulse 1.2s infinite; display: none;
+  }
+  #edgeTrigger.new .new-dot { display: block; }
+
   /* ===== 主区 ===== */
   main { flex: 1; display: flex; gap: 14px; padding: 0 18px 16px; min-height: 0; }
 
@@ -263,6 +283,9 @@
 </header>
 
 <div id="dockTab" onclick="pywebview.api.expand_window()">游戏实时翻译 ▸</div>
+<div id="edgeTrigger" onmouseenter="expandPanel(true)">
+  <span class="new-dot"></span>历史 ▸
+</div>
 
 <main>
   <div class="left">
@@ -340,11 +363,11 @@
     for (const [kind, data] of events) {
       if (kind === "stage") setStage(data.text, data.tone);
       else if (kind === "state") applyState(data);
-      else if (kind === "vision_start") addCard("截图直译", data.thumb, "");
+      else if (kind === "vision_start") { addCard("截图直译", data.thumb, ""); notifyNew(); }
       else if (kind === "ask_start") addCard("问 AI", data.thumb, data.question);
       else if (kind === "vision_delta") appendDelta(data);
       else if (kind === "vision_done") finishCard();
-      else if (kind === "translation") addCard("翻译", null, null, data.original, data.translated);
+      else if (kind === "translation") { addCard("翻译", null, null, data.original, data.translated); notifyNew(); }
       else if (kind === "docked") {
         document.body.classList.toggle("docked", !!data.side);
         const tab = document.getElementById("dockTab");
@@ -356,6 +379,34 @@
   // 窗口按钮（拖动由 pywebview 自带 easy_drag 处理：任意非交互区域按住即可拖）
   function winMin() { pywebview.api.minimize_window(); }
   function winClose() { pywebview.api.close_window(); }
+
+  // ---------- 面板宽窄切换（右侧区域悬停展开） ----------
+  function fitLayout() {
+    document.body.classList.toggle("compact", window.innerWidth < 640);
+  }
+  window.addEventListener("resize", fitLayout);
+  fitLayout();
+
+  function expandPanel(on) {
+    document.getElementById("edgeTrigger").classList.remove("new");
+    pywebview.api.expand_panel(on);
+  }
+  // 收起态有新输出：右缘竖条红点提醒
+  function notifyNew() {
+    if (document.body.classList.contains("compact"))
+      document.getElementById("edgeTrigger").classList.add("new");
+  }
+  // 鼠标离开窗口：延迟收起（输入中不收）
+  let collapseTimer = null;
+  document.addEventListener("mouseleave", () => {
+    collapseTimer = setTimeout(() => {
+      if (document.activeElement === document.getElementById("askInput")) return;
+      if (!document.body.classList.contains("compact") &&
+          !document.body.classList.contains("docked"))
+        pywebview.api.expand_panel(false);
+    }, 280);
+  });
+  document.addEventListener("mouseenter", () => clearTimeout(collapseTimer));
 
   // ---------- JS → Python ----------
   function py(name) { pywebview.api.action(name); }

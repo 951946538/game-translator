@@ -120,3 +120,8 @@ class PyApi:
     def expand_window(self):
         self._app_provider()._expand_window()
         return True
+
+    def expand_panel(self, expanded):
+        """主面板宽窄切换：True 展开（含右侧历史/提问区），False 收起（仅左列）"""
+        self._app_provider()._expand_panel(bool(expanded))
+        return True
