@@ -145,6 +145,14 @@ class App:
         self.root = tk.Tk()
         self.root.title("游戏实时翻译")
         self.root.withdraw()  # 控制面板已由 pywebview 承担，tk 主窗隐藏
+        # pythonw 模式下 tk 的 withdraw 偶发不生效（窗口仍可见/占任务栏）：
+        # Win32 级 SW_HIDE 双保险
+        try:
+            import ctypes
+            tk_hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            ctypes.windll.user32.ShowWindow(tk_hwnd, 0)
+        except Exception:
+            pass
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.overlay_mode = self.config.get("overlay_mode", default="inplace")
