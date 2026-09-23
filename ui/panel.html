@@ -44,6 +44,19 @@
   .t-btn:hover { background: var(--input-hover); }
   .t-btn.close:hover { background: #e5484d; color: #fff; }
 
+  .toolbar { display: flex; gap: 6px; padding: 8px 12px 0; flex-wrap: wrap; }
+  .tb {
+    border: none; border-radius: 8px; padding: 7px 12px; cursor: pointer;
+    font-family: inherit; font-size: 11.5px; color: var(--text);
+    background: var(--input); transition: all .15s;
+  }
+  .tb:hover { background: var(--input-hover); }
+  .tb.purple { background: linear-gradient(135deg, #7c3aed, #8b5cf6); color: #fff; }
+  .tb.green { background: linear-gradient(135deg, #2d6a4f, #40916c); color: #fff; }
+  .tb.blue { background: linear-gradient(135deg, #2563eb, #3b82f6); color: #fff; }
+  .tb.purple:hover, .tb.green:hover, .tb.blue:hover { filter: brightness(1.15); }
+  .tb .k { font-size: 9px; opacity: .75; margin-left: 3px; }
+
   .tabs { display: flex; gap: 6px; padding: 10px 16px 0; }
   .tab {
     border: none; background: transparent; color: var(--text-dim);
@@ -154,6 +167,14 @@
     <button class="t-btn close" title="隐藏" onclick="pywebview.api.close_output()">✕</button>
   </div>
 
+  <div class="toolbar">
+    <button class="tb purple" @click="py('f5')">截图直译<span class="k">F5</span></button>
+    <button class="tb green" @click="py('f6')">立即翻译<span class="k">F6</span></button>
+    <button class="tb blue" @click="py('f7')">游戏窗口<span class="k">F7</span></button>
+    <button class="tb" @click="py('f9')">{{ paused ? '恢复自动' : '暂停自动' }}<span class="k">F9</span></button>
+    <button class="tb" @click="py('f11')">显示: {{ modeLabel }}<span class="k">F11</span></button>
+  </div>
+
   <div class="tabs">
     <button class="tab" :class="{active: tab==='live'}" @click="tab='live'">
       实时翻译<span v-if="newLive" class="n">{{ newLive }}</span>
@@ -226,6 +247,11 @@ createApp({
     const attachedImage = ref(null);   // 引用的历史截图（data URI）
     const newLive = ref(0);
     const newChat = ref(0);
+    const paused = ref(false);
+    const modeLabel = ref("覆盖原文");
+    const MODE_LABELS = { inplace: "覆盖原文", panel: "独立面板", lyrics: "桌面歌词" };
+
+    function py(name) { pywebview.api.action(name); }
     const chatList = ref(null);
     const liveList = ref(null);
     const askInput = ref(null);
@@ -249,6 +275,10 @@ createApp({
     window.__pyEvents = function(events) {
       let needScroll = false;
       for (const [kind, data] of events) {
+        if (kind === "state") {
+          if (data.paused !== undefined) paused.value = data.paused;
+          if (data.overlay_mode) modeLabel.value = MODE_LABELS[data.overlay_mode] || data.overlay_mode;
+        }
         if (kind === "translation") {
           live.value.push({ id: ++uid, time: now(), original: data.original, translated: data.translated });
           if (live.value.length > 100) live.value.shift();  // 旧的先出（正序）
@@ -297,9 +327,18 @@ createApp({
     }
 
     return { tab, live, chat, question, withImage, attachedImage,
-             newLive, newChat, chatList, liveList, askInput, ask, askAbout };
+             newLive, newChat, chatList, liveList, askInput, ask, askAbout,
+             paused, modeLabel, py };
   },
 }).mount("#app");
+
+// 初始化拉取一次状态（暂停/显示模式）
+window.addEventListener("pywebviewready", () => {
+  pywebview.api.get_state().then(s => {
+    // state 由 Vue __pyEvents 处理，这里手动派发一次
+    window.__pyEvents([["state", s]]);
+  });
+});
 
 // 悬停恢复不透明，移开恢复半透明（看内容时永远清晰，平时不挡游戏）
 document.addEventListener("mouseenter", () => {

@@ -157,15 +157,13 @@
     <div class="badge" id="badge"><span class="dot"></span><span id="badgeText">未监控</span></div>
   </div>
 
-  <div class="btn-grid">
-    <button class="btn purple" onclick="py('f5')">截图直译<span class="k">F5</span></button>
-    <button class="btn green" onclick="py('f6')">立即翻译<span class="k">F6</span></button>
-    <button class="btn primary" onclick="py('f7')">游戏窗口<span class="k">F7</span></button>
-    <button class="btn" onclick="py('f9')">暂停翻译<span class="k">F9</span></button>
-    <button class="btn" id="outputBtn" onclick="openOutput()">
-      输出面板<span class="red-dot"></span>
+  <div class="btn-grid" style="grid-template-columns: 1fr;">
+    <button class="btn primary" id="outputBtn" onclick="openOutput()">
+      输出面板<span class="k" style="font-size:10px;color:rgba(255,255,255,.7)">全部操作与历史都在这里</span><span class="red-dot"></span>
     </button>
-    <button class="btn" onclick="py('f11')">显示切换<span class="k">F11</span></button>
+  </div>
+  <div style="margin-top:10px;text-align:center;font-size:10px;color:var(--text-dim);line-height:1.7">
+    热键：F5 直译 · F6 翻译 · F7 窗口<br>F9 暂停 · F11 显示模式（覆盖/面板/歌词）
   </div>
 </main>
 

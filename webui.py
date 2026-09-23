@@ -13,7 +13,7 @@ class EventBridge:
         "vision_delta": ("panel",),           # 流式增量只发输出窗（主窗不需要高频事件）
         "vision_done": ("panel",),
         "stage": ("main",),                   # 状态卡在主窗
-        "state": ("main",),
+        "state": ("main", "panel"),           # 暂停/显示模式：两窗都要（面板工具栏标签）
         "output_state": ("main",),
         # 其余事件（vision_start / ask_start / translation 等）默认发两窗：
         # 主窗亮红点，输出窗渲染内容

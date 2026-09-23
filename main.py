@@ -892,10 +892,10 @@ def main():
     ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
     api = PyApi(lambda: holder["app"], wins=wins)
 
-    # 主控制窗（固定尺寸 300x520，无边框，永不做 resize；显示时定位右上角+半透明）
+    # 主控制窗（极简状态卡：固定 300x360，无边框；显示时定位右上角+半透明）
     win_main = webview.create_window(
         "游戏实时翻译", os.path.join(ui_dir, "index.html"), js_api=api,
-        width=300, height=520, frameless=True, on_top=True,
+        width=300, height=360, frameless=True, on_top=True,
         background_color="#14141f",
     )
     # 输出面板窗（固定尺寸 860x640，隐藏启动，Vue 双 tab）
