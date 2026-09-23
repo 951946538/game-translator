@@ -279,6 +279,16 @@ class App:
                         rects.append((rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
             except Exception:
                 pass
+        # 输出面板窗口（第二窗口）：可见时同样涂黑排除，避免历史缩略图/译文混入截图
+        try:
+            panel_hwnd = _find_webview_hwnd("输出面板")
+            if panel_hwnd:
+                rect = wintypes.RECT()
+                if user32.GetWindowRect(panel_hwnd, ctypes.byref(rect)):
+                    if rect.right > rect.left and rect.bottom > rect.top:
+                        rects.append((rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
+        except Exception:
+            pass
         return rects
 
     # ---------- 监控与翻译链路 ----------
@@ -505,10 +515,34 @@ class App:
             self._bridge.push("vision_delta", {"type": "content", "text": f"\n[问 AI 失败: {e}]"})
             self._bridge.push("vision_done")
 
+    def _grab_full_frame(self):
+        """F5 专用抓屏：临时隐藏自身全部窗口，等 DWM 合成更新（250ms）后
+        截完整游戏画面（无涂黑块、无工具 UI 混入），截完立即恢复窗口。"""
+        import ctypes
+        import ctypes.wintypes as wintypes
+        user32 = ctypes.windll.user32
+
+        # 收集自身可见窗口（主控窗 + 输出面板）
+        hwnds = [self._webview_hwnd]
+        panel_hwnd = _find_webview_hwnd("输出面板")
+        if panel_hwnd:
+            hwnds.append(panel_hwnd)
+        hidden = [h for h in hwnds if h and user32.IsWindowVisible(h)]
+
+        try:
+            for h in hidden:
+                user32.ShowWindow(h, 0)  # SW_HIDE
+            if hidden:
+                time.sleep(0.25)  # 等 DWM 完成合成更新（30ms 不够，残影会被截到）
+            return self.monitor.clean_grab()
+        finally:
+            for h in hidden:
+                user32.ShowWindow(h, 5)  # SW_SHOW
+
     def _vision_worker(self):
         try:
             self._bridge.push("stage", {"text": "⟳ 截图发送中…", "tone": "warn"})
-            frame = self.monitor.clean_grab()
+            frame = self._grab_full_frame()
             if frame is None:
                 self._bridge.push("vision_delta", "[截图失败]")
                 self._bridge.push("vision_done")
@@ -553,6 +587,13 @@ class App:
         wh = getattr(self, "_webview_hwnd", None)
         if wh:
             my_windows.add(wh)
+        # 输出面板窗也排除（点着面板按 F7 时不应把它当游戏捕获）
+        try:
+            panel_hwnd = _find_webview_hwnd("输出面板")
+            if panel_hwnd:
+                my_windows.add(panel_hwnd)
+        except Exception:
+            pass
         if hwnd in my_windows:
             return None
 
