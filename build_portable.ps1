@@ -23,6 +23,8 @@ New-Item -ItemType Directory -Force -Path $dist | Out-Null
 # 1. Program sources
 Copy-Item (Join-Path $root "main.py") $dist
 Copy-Item (Join-Path $root "app") (Join-Path $dist "app") -Recurse
+Copy-Item (Join-Path $root "webui.py") $dist
+Copy-Item (Join-Path $root "ui") (Join-Path $dist "ui") -Recurse
 
 # 2. Full python runtime (stdlib + tcl/tk)
 Write-Output "Copying python runtime..."

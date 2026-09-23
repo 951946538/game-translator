@@ -1,10 +1,10 @@
 """
 游戏实时翻译工具
 链路：游戏窗口/区域监控（帧差检测+变化区域裁剪）→ PaddleOCR（面板归组）
-    → 翻译后端（Ollama/LLM云API/DeepL 可切换，逐行并发）→ 置顶覆盖层/面板显示
-    F5 截图直译（视觉模型，右侧面板显示截图与完整输出）
+    → LLM 翻译（逐行并发）→ 置顶覆盖层显示；F5 截图直译（视觉模型）与问 AI 走 Web UI
+UI：pywebview（HTML/JS 控制面板，webui.py 桥接）+ tkinter（覆盖层，需 Win32 透明/穿透特性）
 
-热键：F5 截图直译 | F6 立即翻译 | F7 捕获游戏窗口 | F8 框选区域 | F9 暂停/恢复 | F10 切换后端 | F11 覆盖/面板
+热键：F5 截图直译 | F6 立即翻译 | F7 捕获游戏窗口 | F8 框选区域 | F9 暂停/恢复 | F11 覆盖/面板
 """
 import sys
 import os
@@ -32,8 +32,6 @@ if sys.platform == "win32":
         pass
 
 import tkinter as tk
-import tkinter.ttk as ttk
-from datetime import datetime
 
 # 关键：开启进程 DPI 感知，让 tkinter 使用物理像素坐标，
 # 与截屏/OCR 的物理像素坐标一致（否则 125%/150% 缩放下覆盖位置整体偏移）
@@ -56,6 +54,7 @@ from app.region_select import select_region
 from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F11, VK_LWIN, VK_RWIN
 from app.textblock import group_lines
 from app import vision
+from webui import EventBridge, PyApi
 
 # 本工具自身 UI 的文案词表（OCR 兜底过滤：识别结果若全由这些词组成，说明截到了自己的面板，丢弃）
 _UI_WORDS = (
@@ -68,6 +67,7 @@ _UI_WORDS = (
     "按阅读顺序", "整屏发给", "含思考过程",
     "llm", "deepl", "ollama",
     "f6立即翻译", "f7窗口", "f8选区", "f9暂停", "f10后端", "f11显示",
+    "游戏实时翻译", "输出历史", "提问", "带画面", "问", "未监控", "显示切换", "游戏",
 )
 
 
@@ -88,24 +88,30 @@ def _is_own_ui_text(text):
     return norm == ""
 
 
-# ---------- UI 主题（深色） ----------
-UI_BG = "#1e1e2e"        # 窗口底色
-UI_PANEL = "#181825"     # 卡片/记录底色
-UI_INPUT = "#313244"     # 输入框/按钮底色
-UI_INPUT_ACTIVE = "#45475a"
-UI_TEXT = "#cdd6f4"      # 主文字
-UI_TEXT_DIM = "#6c7086"  # 次要文字
-UI_ACCENT = "#89b4fa"    # 强调蓝（状态）
-UI_GREEN = "#a6e3a1"
-UI_PURPLE = "#cba6f7"
-UI_FONT = "Microsoft YaHei UI"
+def _thumb_b64(frame, width=520, quality=80):
+    """截图帧 → JPEG base64 data URI（推送给 Web UI 历史卡片显示）"""
+    try:
+        import base64
+        import cv2
+        import numpy as np
+        h, w = frame.shape[:2]
+        if w > width:
+            frame = cv2.resize(frame, (width, int(h * width / w)))
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            return None
+        return "data:image/jpeg;base64," + base64.b64encode(buf).decode("ascii")
+    except Exception:
+        return None
 
 
 class App:
     window_ids = []  # 本工具所有窗口的 winfo_id（用于 F7 排除自身窗口）
 
-    def __init__(self):
+    def __init__(self, bridge: EventBridge):
         App.window_ids = []
+        self._bridge = bridge
+        self._status_text = ""
         self.config = Config()
         self.translator = Translator(self.config)
 
@@ -125,35 +131,30 @@ class App:
         self._game_hwnd = None            # F7 捕获的游戏窗口句柄（Win 键智能屏蔽用）
         self._positioned_history = []     # 覆盖层译文累积（跨帧保留未变化区域的旧译文）
 
-        # 队列：监控线程 -> OCR 线程 -> 翻译线程 -> UI 主线程（流水线并发）
+        # 队列：监控线程 -> OCR 线程 -> 翻译线程 -> UI（流水线并发）
         self.ocr_queue = queue.Queue()
         self.translate_queue = queue.Queue()
-        self.ui_queue = queue.Queue()
+        self.ui_queue = queue.Queue()  # 仅 tk 侧消费（覆盖层绘制/窗口关闭）
         self._ocr_lock = threading.Lock()
 
-        # ---------- UI ----------
+        # ---------- tkinter 侧：隐藏主窗（仅作 overlay 载体与 DPI 校准） ----------
         self.root = tk.Tk()
         self.root.title("游戏实时翻译")
-        self.root.geometry("1120x500")
-        self.root.configure(bg=UI_BG)
-        self.root.attributes("-topmost", True)  # 控制面板永久置顶，方便实时操作
+        self.root.withdraw()  # 控制面板已由 pywebview 承担，tk 主窗隐藏
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.overlay_mode = self.config.get("overlay_mode", default="inplace")
-        self._build_panel()
 
         # ---- 屏幕坐标系校准 ----
-        # mss/OCR 使用物理像素；tkinter 在 DPI 感知失败时使用逻辑像素。
-        # 记录两者比例，框选/绘制时统一换算，彻底解决高分屏（如 3800x2000）偏移问题。
         self.root.update_idletasks()
         import mss as _mss
-        _MSS = getattr(_mss, "MSS", _mss.mss)  # 兼容 mss 9.x(mss) / 10.x(MSS)
+        _MSS = getattr(_mss, "MSS", _mss.mss)
         with _MSS() as _sct:
             _mon = _sct.monitors[1]
         self._dpi_fx = self.root.winfo_screenwidth() / _mon["width"]
         self._dpi_fy = self.root.winfo_screenheight() / _mon["height"]
         logging.info(
-            "屏幕校准: tkinter=%dx%d, mss=%dx%d, 坐标换算系数=(%.3f, %.3f)",
+            "屏幕校准: tkinter=%dx%d, mss=%dx%d, 系数=(%.3f, %.3f)",
             self.root.winfo_screenwidth(), self.root.winfo_screenheight(),
             _mon["width"], _mon["height"], self._dpi_fx, self._dpi_fy,
         )
@@ -161,104 +162,18 @@ class App:
         self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
         App.window_ids.append(self.root.winfo_id())
         App.window_ids.append(self.overlay.win.winfo_id())
+        # webview 控制面板窗口（Win32 级别也加入排除列表，避免被 F7 当成游戏目标/截图混入）
+        try:
+            import webview
+            # pywebview 窗口句柄在窗口创建后才能拿到，由 webui 侧回填（见 main()）
+        except Exception:
+            pass
 
         # OCR 线程 + 翻译线程（并行流水线），启动即后台预加载模型
         threading.Thread(target=self._ocr_worker, daemon=True).start()
         threading.Thread(target=self._translate_worker, daemon=True).start()
         threading.Thread(target=self._preload_ocr, daemon=True).start()
-        # UI 队列轮询
         self.root.after(100, self._poll_ui_queue)
-        # 首次启动未配置密钥：弹出设置窗口（分发给朋友时各自填写自己的密钥）
-        self.root.after(400, self._check_api_config)
-
-    # ---------- API 设置（密钥存 Windows 凭据管理器） ----------
-
-    def _check_api_config(self):
-        if not self.config.get_api_key("llm"):
-            self.show_settings_dialog()
-
-    def show_settings_dialog(self):
-        import webbrowser
-
-        win = tk.Toplevel(self.root)
-        win.title("API 设置")
-        win.configure(bg=UI_BG, padx=18, pady=14)
-        win.transient(self.root)
-        win.grab_set()
-        win.resizable(False, False)
-
-        tk.Label(
-            win, text="配置 DeepSeek API", font=(UI_FONT, 13, "bold"),
-            fg=UI_ACCENT, bg=UI_BG,
-        ).pack(anchor="w", pady=(0, 4))
-        tk.Label(
-            win, text="密钥仅保存在本机 Windows 凭据管理器，不写入任何文件。",
-            fg=UI_TEXT_DIM, bg=UI_BG, font=(UI_FONT, 9),
-        ).pack(anchor="w", pady=(0, 8))
-        tk.Button(
-            win, text="① 打开 DeepSeek 平台注册并创建密钥 →",
-            command=lambda: webbrowser.open("https://platform.deepseek.com/api_keys"),
-            bg=UI_INPUT, fg=UI_TEXT, activebackground=UI_INPUT_ACTIVE,
-            activeforeground="white", bd=0, pady=4, cursor="hand2", anchor="w",
-        ).pack(fill="x", pady=(0, 10))
-
-        def field(label, default="", show=""):
-            tk.Label(win, text=label, fg=UI_TEXT, bg=UI_BG, font=(UI_FONT, 10)).pack(anchor="w")
-            var = tk.StringVar(value=default)
-            tk.Entry(
-                win, textvariable=var, show=show, bg=UI_INPUT, fg=UI_TEXT,
-                insertbackground="white", bd=0, relief="flat", font=(UI_FONT, 10), width=44,
-            ).pack(fill="x", ipady=5, pady=(3, 8))
-            return var
-
-        url_var = field("API 地址（OpenAI 兼容）", self.config.get("llm", "base_url", default="https://api.deepseek.com/v1"))
-        key_var = field("API 密钥", show="•")
-
-        def save():
-            key = key_var.get().strip()
-            if not key:
-                win.destroy()
-                return
-            if url_var.get().strip():
-                self.config.set(url_var.get().strip(), "llm", "base_url")
-            self.config.set_api_key(key, "llm")
-            self.config.save()
-            self.status_var.set("API 密钥已保存到 Windows 凭据管理器")
-            win.destroy()
-
-        bar = tk.Frame(win, bg=UI_BG)
-        bar.pack(fill="x", pady=(4, 0))
-        tk.Button(bar, text="取消", command=win.destroy, bg=UI_INPUT, fg=UI_TEXT,
-                  activebackground=UI_INPUT_ACTIVE, activeforeground="white", bd=0,
-                  pady=4, padx=12, cursor="hand2").pack(side="right", padx=(6, 0))
-        tk.Button(bar, text="保存", command=save, bg="#2563eb", fg="white",
-                  activebackground="#3b82f6", bd=0, pady=4, padx=16, cursor="hand2").pack(side="right")
-
-    def show_help(self):
-        import webbrowser
-
-        win = tk.Toplevel(self.root)
-        win.title("使用说明")
-        win.configure(bg=UI_BG, padx=18, pady=14)
-        win.transient(self.root)
-        win.grab_set()
-        text = (
-            "快速上手：\n"
-            "  1. 点「API 设置」填入自己的 DeepSeek 密钥（存在本机凭据管理器）\n"
-            "  2. 打开游戏，点击一下游戏画面，按 F7 捕获游戏窗口\n"
-            "  3. 按 F6 立即翻译（译文盖在原文上）；F5 截图直译（整屏发给视觉模型）\n"
-            "  4. 右侧输入框可直接向 AI 提问，勾选「带画面」可结合当前游戏画面\n\n"
-            "热键：F5 截图直译 | F6 立即翻译 | F7 游戏窗口 | F8 框选区域\n"
-            "      F9 暂停/恢复自动翻译 | F11 覆盖原文/独立面板\n\n"
-            "密钥获取：platform.deepseek.com 注册后创建 API Key"
-        )
-        tk.Label(win, text=text, justify="left", fg=UI_TEXT, bg=UI_BG,
-                 font=(UI_FONT, 10)).pack(anchor="w")
-        tk.Button(
-            win, text="打开 DeepSeek 平台", command=lambda: webbrowser.open("https://platform.deepseek.com/api_keys"),
-            bg=UI_INPUT, fg=UI_TEXT, activebackground=UI_INPUT_ACTIVE, activeforeground="white",
-            bd=0, pady=4, cursor="hand2",
-        ).pack(pady=(10, 0))
 
     def _preload_ocr(self):
         """启动时后台预加载 OCR 模型：用户切去游戏的空档完成加载，首次翻译不再等"""
@@ -276,175 +191,43 @@ class App:
             except Exception:
                 logging.error("OCR 模型预加载失败:\n%s", traceback.format_exc())
 
-    # ---------- 控制面板 ----------
+    # ---------- Web UI 推送 ----------
 
-    def _build_panel(self):
-        main_frame = tk.Frame(self.root, bg=UI_BG)
-        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    def _status(self, text):
+        """详细状态行（显示在 Web UI 状态卡下方）"""
+        self._status_text = text
+        self._push_state()
 
-        # ===== 左列：状态 + 操作 =====
-        left = tk.Frame(main_frame, bg=UI_BG)
-        left.pack(side="left", fill="y", padx=(0, 12))
+    def _push_state(self):
+        self._bridge.push("state", {
+            "paused": self.paused,
+            "overlay_mode": self.overlay_mode,
+            "region": list(self.config.region) if self.config.region and self.config.region != "fullscreen" else self.config.region,
+            "status": self._status_text,
+        })
 
-        # 大字状态（翻译流程实时提示）
-        self.big_status_var = tk.StringVar(value="等待选择区域\n按 F7 捕获游戏窗口")
-        self.big_status = tk.Label(
-            left, textvariable=self.big_status_var, bg=UI_BG,
-            font=(UI_FONT, 15, "bold"), fg=UI_ACCENT,
-        )
-        self.big_status.pack(pady=(10, 4))
+    def _set_stage(self, text, tone="info", revert_to=None, revert_ms=2000):
+        """大字状态（翻译流程实时提示）；revert_to 给定时自动回落"""
+        self._bridge.push("stage", {"text": text, "tone": tone})
+        old = getattr(self, "_stage_timer", None)
+        if old:
+            old.cancel()
+        if revert_to:
+            def _revert():
+                self._bridge.push("stage", {"text": revert_to, "tone": "info"})
+            t = threading.Timer(revert_ms / 1000, _revert)
+            t.daemon = True
+            t.start()
+            self._stage_timer = t
 
-        # 详细状态行
-        self.status_var = tk.StringVar(value="")
-        tk.Label(
-            left, textvariable=self.status_var, bg=UI_BG,
-            fg=UI_TEXT_DIM, font=(UI_FONT, 9),
-        ).pack(pady=2)
+    def _monitor_status_text(self):
+        if self.paused:
+            return "⏸ 已暂停"
+        if not self.config.region:
+            return "等待选择区域\n按 F7 捕获游戏窗口"
+        return "● 监控中"
 
-        # 按钮区（两行）
-        btns = tk.Frame(left, bg=UI_BG)
-        btns.pack(pady=12)
-        btn_cfg = dict(
-            bg=UI_INPUT, fg=UI_TEXT, activebackground=UI_INPUT_ACTIVE,
-            activeforeground="white", bd=0, pady=5, cursor="hand2",
-        )
-        self.vision_btn = tk.Button(
-            btns, text="截图直译 F5", command=self.vision_translate_async,
-            bg="#7c3aed", fg="white", activebackground="#8b5cf6",
-            bd=0, pady=5, cursor="hand2",
-        )
-        self.vision_btn.grid(row=0, column=0, padx=3, pady=3, sticky="ew")
-        self.trigger_btn = tk.Button(
-            btns, text="立即翻译 F6", command=self.trigger_now_async,
-            bg="#2d6a4f", fg="white", activebackground="#40916c",
-            bd=0, pady=5, cursor="hand2",
-        )
-        self.trigger_btn.grid(row=0, column=1, padx=3, pady=3, sticky="ew")
-        tk.Button(
-            btns, text="游戏窗口 F7", command=self.set_fullscreen_async,
-            bg="#2563eb", fg="white", activebackground="#3b82f6",
-            bd=0, pady=5, cursor="hand2",
-        ).grid(row=0, column=2, padx=3, pady=3, sticky="ew")
-
-        self.pause_btn = tk.Button(
-            btns, text="恢复 (F9)" if self.paused else "暂停 (F9)",
-            command=self.toggle_pause, **btn_cfg,
-        )
-        self.pause_btn.grid(row=1, column=0, padx=3, pady=3, sticky="ew")
-        self.mode_btn = tk.Button(btns, text="", command=self.toggle_overlay_mode, **btn_cfg)
-        self.mode_btn.grid(row=1, column=1, padx=3, pady=3, sticky="ew")
-        tk.Button(btns, text="框选区域 F8", command=self.select_region_async, **btn_cfg).grid(
-            row=1, column=2, padx=3, pady=3, sticky="ew",
-        )
-        self._refresh_mode_btn()
-
-        # API 设置（密钥存 Windows 凭据管理器，分发给他人时各自填写）
-        tk.Button(
-            btns, text="API 设置", command=self.show_settings_dialog, **btn_cfg,
-        ).grid(row=2, column=0, padx=3, pady=3, sticky="ew")
-        tk.Button(
-            btns, text="使用说明", command=self.show_help, **btn_cfg,
-        ).grid(row=2, column=1, padx=3, pady=3, sticky="ew")
-
-        # ===== 右列：问 AI 输入条 + 输出历史 =====
-        right = tk.Frame(main_frame, bg=UI_BG)
-        right.pack(side="right", fill="both", expand=True)
-
-        # 问 AI 输入条
-        ask_bar = tk.Frame(right, bg=UI_BG)
-        ask_bar.pack(fill="x", pady=(0, 6))
-        self.ask_entry_var = tk.StringVar()
-        self.ask_entry = tk.Entry(
-            ask_bar, textvariable=self.ask_entry_var,
-            bg=UI_INPUT, fg=UI_TEXT, insertbackground="white",
-            bd=0, relief="flat", font=(UI_FONT, 11),
-        )
-        self.ask_entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 6))
-        self.ask_entry.bind("<Return>", lambda e: self.ask_ai_async())
-        self.with_image_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            ask_bar, text="带画面", variable=self.with_image_var,
-            bg=UI_BG, fg=UI_TEXT_DIM, selectcolor=UI_INPUT,
-            activebackground=UI_BG, activeforeground=UI_TEXT, bd=0,
-            font=(UI_FONT, 9),
-        ).pack(side="right", padx=(6, 0))
-        tk.Button(
-            ask_bar, text="提问", command=self.ask_ai_async,
-            bg="#2563eb", fg="white", activebackground="#3b82f6",
-            bd=0, pady=4, padx=14, cursor="hand2", font=(UI_FONT, 10, "bold"),
-        ).pack(side="right")
-
-        # 输出历史（截图直译 / 问 AI 混合，每条 = 时间 + 缩略图 + 输出）
-        tk.Label(
-            right, text="输出历史（F5 截图直译 · 提问回答）",
-            font=(UI_FONT, 9, "bold"), fg=UI_PURPLE, anchor="w", bg=UI_BG,
-        ).pack(fill="x", pady=(0, 2))
-
-        self.vision_canvas = tk.Canvas(right, highlightthickness=0, bg=UI_BG)
-        vsb = ttk.Scrollbar(right, orient="vertical", command=self.vision_canvas.yview)
-        self.vision_canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        self.vision_canvas.pack(side="left", fill="both", expand=True)
-        self.vision_inner = tk.Frame(self.vision_canvas, bg=UI_BG)
-        self._vision_win = self.vision_canvas.create_window((0, 0), window=self.vision_inner, anchor="nw")
-        self.vision_inner.bind(
-            "<Configure>",
-            lambda e: self.vision_canvas.configure(scrollregion=self.vision_canvas.bbox("all")),
-        )
-        self.vision_canvas.bind(
-            "<Configure>",
-            lambda e: self.vision_canvas.itemconfigure(self._vision_win, width=e.width),
-        )
-        self._vision_first = None  # 最早一条记录（新记录插到它上面，保持最新在顶部）
-        self._bind_wheel(self.vision_canvas)
-        self._bind_wheel(self.vision_inner)
-
-    def _bind_wheel(self, widget):
-        """鼠标滚轮：进入面板区域时接管滚动，离开后释放"""
-        widget.bind("<Enter>", lambda e: widget.bind_all(
-            "<MouseWheel>", lambda ev: self.vision_canvas.yview_scroll(int(-ev.delta / 120), "units")))
-        widget.bind("<Leave>", lambda e: widget.unbind_all("<MouseWheel>"))
-
-    def _vision_record_start(self, thumb, title="截图直译", prefix=""):
-        """新增一条输出记录骨架（时间戳 + 标题 + 可选缩略图 + 空输出区），
-        正文由后续 vision_delta 流式追加（打字机效果）"""
-        from PIL import ImageTk
-
-        rec = tk.Frame(self.vision_inner, bg=UI_PANEL, bd=0, highlightthickness=1,
-                       highlightbackground=UI_INPUT)
-        if self._vision_first is None:
-            rec.pack(fill="x", pady=5, padx=2)
-            self._vision_first = rec
-        else:
-            rec.pack(fill="x", pady=5, padx=2, before=self._vision_first)
-
-        tk.Label(
-            rec, text=f"🕐 {datetime.now().strftime('%H:%M:%S')}  {title}",
-            font=(UI_FONT, 9, "bold"), fg=UI_PURPLE, anchor="w", bg=UI_PANEL,
-        ).pack(fill="x", padx=8, pady=(6, 3))
-
-        if thumb is not None:
-            photo = ImageTk.PhotoImage(thumb)
-            lbl = tk.Label(rec, image=photo, bd=0, bg=UI_PANEL)
-            lbl.image = photo  # 持有引用防 GC 回收
-            lbl.pack(padx=8, pady=3)
-            self._bind_wheel(lbl)
-
-        body = tk.Text(
-            rec, font=(UI_FONT, 10), wrap="word", bd=0,
-            bg=UI_PANEL, fg=UI_TEXT, padx=8, pady=6, height=6,
-            insertbackground="white",
-        )
-        if prefix:
-            body.insert("end", prefix)
-        body.pack(fill="x", padx=6, pady=(0, 6))
-        self._bind_wheel(body)
-        self._vision_body = body  # vision_delta 持续往这里追加
-
-        self.vision_canvas.update_idletasks()
-        self.vision_canvas.yview_moveto(0)  # 最新记录滚动到顶部
-
-    # ---------- 状态提示 ----------
+    # ---------- 截图排除（涂黑自身窗口矩形） ----------
 
     def _own_window_rects(self):
         """本工具自身不透明窗口的屏幕物理矩形列表（截图涂黑排除用）。
@@ -472,35 +255,17 @@ class App:
                 rects.append((rect.left, rect.top, rw, rh))
             except Exception:
                 pass
-        return rects
-
-    def _set_stage(self, text, color="#409eff", revert_to=None, revert_ms=2000):
-        """更新大字状态；revert_to 给定时，revert_ms 后自动回落"""
-        self.big_status_var.set(text)
-        self.big_status.configure(fg=color)
-        revert_id = getattr(self, "_stage_revert_id", None)
-        if revert_id:
+        # webview 控制面板窗口（主窗口隐藏，webview 是实际可见窗口）
+        hwnd = getattr(self, "_webview_hwnd", None)
+        if hwnd:
             try:
-                self.root.after_cancel(revert_id)
+                rect = wintypes.RECT()
+                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    if rect.right > rect.left and rect.bottom > rect.top:
+                        rects.append((rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
             except Exception:
                 pass
-            self._stage_revert_id = None
-        if revert_to:
-            def _revert():
-                self.big_status_var.set(revert_to)
-                self.big_status.configure(fg="#409eff")
-            self._stage_revert_id = self.root.after(revert_ms, _revert)
-
-    def _monitor_status_text(self):
-        if self.paused:
-            return "⏸ 已暂停"
-        if not self.config.region:
-            return "等待选择区域\n按 F7 捕获游戏窗口"
-        return "● 监控中"
-
-    def _refresh_mode_btn(self):
-        label = "覆盖原文" if self.overlay_mode == "inplace" else "独立面板"
-        self.mode_btn.config(text=f"显示: {label} (F11)")
+        return rects
 
     # ---------- 监控与翻译链路 ----------
 
@@ -522,7 +287,6 @@ class App:
             game_hwnd=self._game_hwnd or 0,
             exclude_rects_provider=self._own_window_rects,
         )
-        # 记录区域在屏幕上的偏移，覆盖模式绘制时把 OCR 相对坐标转换为屏幕绝对坐标
         self._region_offset = self.monitor.offset
         self.monitor.start()
         if self.paused:
@@ -543,7 +307,7 @@ class App:
                 self._positioned_history = []
                 self._last_positioned_key = None
                 self.ui_queue.put(("positioned", []))
-            self.ui_queue.put(("stage", "⟳ 正在识别…"))
+            self._bridge.push("stage", {"text": "⟳ 正在识别…", "tone": "warn"})
             self.ocr_queue.put((frame, origin))
 
     def _ocr_worker(self):
@@ -552,7 +316,6 @@ class App:
             item = self.ocr_queue.get()
             if item is None:
                 break
-            # 处理耗时可能超过截屏间隔：丢弃积压旧帧，只处理最新画面
             while True:
                 try:
                     item = self.ocr_queue.get_nowait()
@@ -562,13 +325,13 @@ class App:
             try:
                 with self._ocr_lock:
                     if self.ocr_engine is None:
-                        self.ui_queue.put(("status", "正在加载 PaddleOCR 模型（首次约 10-30 秒）…"))
+                        self._status("正在加载 PaddleOCR 模型（首次约 10-30 秒）…")
                         self.ocr_engine = OCREngine(
                             lang="en",
                             min_score=self.config.get("ocr_min_score", default=0.6),
                             high_accuracy=self.config.get("ocr_high_accuracy", default=False),
                         )
-                        self.ui_queue.put(("status", f"监控中 · {self._region_text(self.config.region)}"))
+                        self._status(f"监控中 · {self._region_text(self.config.region)}")
 
                 if self.overlay_mode == "inplace":
                     # 覆盖模式：带坐标识别 + 按文本框面板归组（保证换行长句的翻译上下文完整）
@@ -582,17 +345,16 @@ class App:
                         b["box"] = [bx[0] + ox, bx[1] + oy, bx[2] + ox, bx[3] + oy]
                     logging.info("OCR 完成：%d 行合并为 %d 个文本块", len(items), len(blocks))
                     if blocks:
-                        self.ui_queue.put(("stage", "⟳ 正在翻译…"))
+                        self._bridge.push("stage", {"text": "⟳ 正在翻译…", "tone": "warn"})
                         self.translate_queue.put(("positioned", blocks))
                 else:
-                    # 面板模式：整段识别，交给翻译线程
                     text = self.ocr_engine.extract(frame)
                     if text and not _is_own_ui_text(text):
-                        self.ui_queue.put(("stage", "⟳ 正在翻译…"))
+                        self._bridge.push("stage", {"text": "⟳ 正在翻译…", "tone": "warn"})
                         self.translate_queue.put(("panel", text))
             except Exception as e:
                 logging.error("OCR 处理失败:\n%s", traceback.format_exc())
-                self.ui_queue.put(("status", f"处理失败: {e}"))
+                self._status(f"处理失败: {e}")
 
     @staticmethod
     def _boxes_overlap(a, b):
@@ -629,7 +391,6 @@ class App:
                     ]
                     if positioned:
                         # 跨帧累积：新块覆盖与之重叠的旧块，其余旧译文保留
-                        # （对话更新时只刷新对话区，侧边栏/按钮的旧译文不消失）
                         kept = [
                             old for old in self._positioned_history
                             if not any(self._boxes_overlap(old["box"], n["box"]) for n in positioned)
@@ -638,64 +399,46 @@ class App:
                         if len(self._positioned_history) > 30:
                             self._positioned_history = self._positioned_history[-30:]
                         logging.info("翻译完成：%d 块（累计 %d 块）", len(positioned), len(self._positioned_history))
-                        self.ui_queue.put(("stage_done", len(positioned)))
+                        self._bridge.push("stage", {
+                            "text": f"✓ 翻译完成（{len(positioned)} 块）", "tone": "success",
+                        })
+                        threading.Timer(2.0, lambda: self._bridge.push(
+                            "stage", {"text": self._monitor_status_text(), "tone": "info"})).start()
                         self.ui_queue.put(("positioned", list(self._positioned_history)))
+                        # 翻译历史：原文/译文对照推给 Web UI（文本游戏回看）
+                        self._bridge.push("translation", {
+                            "original": "\n".join(lines),
+                            "translated": "\n".join(t for t in translated if t),
+                        })
                 else:
                     translated = self.translator.translate(payload)
                     if translated is not None:
-                        self.ui_queue.put(("stage_done", None))
+                        self._bridge.push("stage", {"text": "✓ 翻译完成", "tone": "success"})
                         self.ui_queue.put(("translation", payload, translated))
             except Exception as e:
                 logging.error("翻译处理失败:\n%s", traceback.format_exc())
-                self.ui_queue.put(("status", f"处理失败: {e}"))
+                self._status(f"处理失败: {e}")
 
-    # ---------- UI 队列消费 ----------
+    # ---------- UI 队列消费（tk 线程：仅覆盖层相关） ----------
 
     def _poll_ui_queue(self):
         try:
             while True:
                 item = self.ui_queue.get_nowait()
                 kind = item[0]
-                if kind == "status":
-                    self.status_var.set(item[1])
-                elif kind == "stage":
-                    # 翻译流程阶段提示（正在识别/正在翻译）
-                    self._set_stage(item[1], "#e6a23c")
-                elif kind == "stage_done":
-                    count = item[1]
-                    text = f"✓ 翻译完成（{count} 块）" if count else "✓ 翻译完成"
-                    self._set_stage(text, "#67c23a", revert_to=self._monitor_status_text())
+                if kind == "positioned":
+                    self.overlay.update_positioned(item[1])
                 elif kind == "translation":
                     _, original, translated = item
                     self.overlay.update_translation(translated, self.translator.backend, self.paused)
-                elif kind == "positioned":
-                    _, positioned = item
-                    self.overlay.update_positioned(positioned)
-                elif kind == "vision_start":
-                    self._vision_record_start(item[1], title="截图直译")
-                elif kind == "ask_start":
-                    _, question, thumb = item
-                    self._vision_record_start(thumb, title="问 AI", prefix=f"❓ {question}\n\n")
-                    self._vision_body.see("end")
-                elif kind == "vision_delta":
-                    body = getattr(self, "_vision_body", None)
-                    if body is not None:
-                        body.configure(state="normal")
-                        body.insert("end", item[1])
-                        body.see("end")
-                        body.configure(state="disabled")
-                elif kind == "vision_done":
-                    body = getattr(self, "_vision_body", None)
-                    if body is not None:
-                        # 按最终内容行数调整高度（流式期间固定高度+自动滚动）
-                        n_lines = max(4, min(30, body.get("1.0", "end").count("\n") + 1))
-                        body.configure(height=n_lines)
-                        self._vision_body = None
+                elif kind == "shutdown":
+                    self.root.destroy()
+                    return
         except queue.Empty:
             pass
         self.root.after(100, self._poll_ui_queue)
 
-    # ---------- 热键动作（pynput 回调线程 → 调度到主线程） ----------
+    # ---------- 热键/按钮动作（线程安全，可从热键线程或 webview 线程调用） ----------
 
     def select_region_async(self):
         self.root.after(0, self.do_select_region)
@@ -704,86 +447,67 @@ class App:
         self.root.after(0, self.do_capture_foreground)
 
     def trigger_now_async(self):
-        # 手动翻译不依赖 UI 线程，直接在热键线程执行
         if self.monitor:
             self.monitor.capture_now()
 
     def vision_translate_async(self):
-        """截图直译（F5）：整屏截图直接发给视觉模型，译文显示在右侧面板"""
+        """截图直译（F5）：整屏截图直接发给视觉模型，流式输出到 Web UI"""
         if self.monitor:
             threading.Thread(target=self._vision_worker, daemon=True).start()
 
-    def ask_ai_async(self):
-        """问 AI：输入框的问题发给 LLM（可勾选附带当前游戏画面给视觉模型）"""
-        question = (self.ask_entry_var.get() or "").strip()
-        if not question:
-            self.ask_entry.focus_set()
-            return
-        self.ask_entry_var.set("")
-        threading.Thread(target=self._ask_worker, args=(question,), daemon=True).start()
+    def ask_ai_async(self, question, with_image=False):
+        """问 AI（Web UI 输入框触发）"""
+        question = (question or "").strip()
+        if question:
+            threading.Thread(target=self._ask_worker, args=(question, with_image), daemon=True).start()
 
-    def _ask_worker(self, question):
+    def _ask_worker(self, question, with_image=False):
         try:
-            from PIL import Image
-            with_image = self.with_image_var.get()
-
             thumb = None
+            frame = None
             if with_image and self.monitor:
-                self.ui_queue.put(("stage", "⟳ 截图发送中…"))
+                self._bridge.push("stage", {"text": "⟳ 截图发送中…", "tone": "warn"})
                 frame = self.monitor.clean_grab()
                 if frame is not None:
-                    thumb = Image.fromarray(frame)
-                    tw = 340
-                    if thumb.width > tw:
-                        thumb = thumb.resize((tw, max(1, round(thumb.height * tw / thumb.width))))
-            else:
-                frame = None
+                    thumb = _thumb_b64(frame)
 
-            self.ui_queue.put(("stage", "⟳ AI 回答中…"))
-            self.ui_queue.put(("ask_start", question, thumb))
+            self._bridge.push("stage", {"text": "⟳ AI 回答中…", "tone": "warn"})
+            self._bridge.push("ask_start", {"question": question, "thumb": thumb})
 
             got_reasoning = got_content = False
             for kind, chunk in vision.ask_stream(question, frame, self.config, with_image):
                 if kind == "reasoning":
                     if not got_reasoning:
                         got_reasoning = True
-                        self.ui_queue.put(("vision_delta", "──── 思考过程 ────\n"))
-                    self.ui_queue.put(("vision_delta", chunk))
+                        self._bridge.push("vision_delta", "──── 思考过程 ────\n")
+                    self._bridge.push("vision_delta", chunk)
                 else:
                     if not got_content:
                         got_content = True
                         if got_reasoning:
-                            self.ui_queue.put(("vision_delta", "\n\n──── 回答 ────\n"))
-                    self.ui_queue.put(("vision_delta", chunk))
+                            self._bridge.push("vision_delta", "\n\n──── 回答 ────\n")
+                    self._bridge.push("vision_delta", chunk)
 
-            self.ui_queue.put(("vision_done", None))
-            self.ui_queue.put(("stage_done", None))
+            self._bridge.push("vision_done")
+            self._bridge.push("stage", {"text": "✓ 回答完成", "tone": "success"})
             logging.info("问 AI 完成（%s）", "带画面" if with_image else "纯文本")
         except Exception as e:
             logging.error("问 AI 失败:\n%s", traceback.format_exc())
-            self.ui_queue.put(("vision_delta", f"\n[问 AI 失败: {e}]"))
-            self.ui_queue.put(("vision_done", None))
+            self._bridge.push("vision_delta", f"\n[问 AI 失败: {e}]")
+            self._bridge.push("vision_done")
 
     def _vision_worker(self):
         try:
-            from PIL import Image
-
-            self.ui_queue.put(("stage", "⟳ 截图发送中…"))
-            # 优先游戏窗口直接抓取（悬浮窗永不混入），否则屏幕+隐藏自身窗口
+            self._bridge.push("stage", {"text": "⟳ 截图发送中…", "tone": "warn"})
             frame = self.monitor.clean_grab()
             if frame is None:
-                self.ui_queue.put(("vision_delta", "[截图失败]"))
-                self.ui_queue.put(("vision_done", None))
+                self._bridge.push("vision_delta", "[截图失败]")
+                self._bridge.push("vision_done")
                 return
 
-            # 截图缩略图（在记录中体现本次翻译的是哪张图）
-            thumb = Image.fromarray(frame)
-            tw = 340
-            if thumb.width > tw:
-                thumb = thumb.resize((tw, max(1, round(thumb.height * tw / thumb.width))))
-
-            self.ui_queue.put(("stage", "⟳ 视觉模型翻译中…"))
-            self.ui_queue.put(("vision_start", thumb))
+            thumb = _thumb_b64(frame)
+            self._bridge.push("stage", {"text": "⟳ 视觉模型翻译中…", "tone": "warn"})
+            self._bridge.push("vision_start", {"thumb": thumb})
             logging.info("截图直译：发送 %dx%d 给视觉模型（流式）", frame.shape[1], frame.shape[0])
 
             got_reasoning = got_content = False
@@ -791,22 +515,22 @@ class App:
                 if kind == "reasoning":
                     if not got_reasoning:
                         got_reasoning = True
-                        self.ui_queue.put(("vision_delta", "──── 思考过程 ────\n"))
-                    self.ui_queue.put(("vision_delta", chunk))
+                        self._bridge.push("vision_delta", "──── 思考过程 ────\n")
+                    self._bridge.push("vision_delta", chunk)
                 else:
                     if not got_content:
                         got_content = True
                         if got_reasoning:
-                            self.ui_queue.put(("vision_delta", "\n\n──── 译文 ────\n"))
-                    self.ui_queue.put(("vision_delta", chunk))
+                            self._bridge.push("vision_delta", "\n\n──── 译文 ────\n")
+                    self._bridge.push("vision_delta", chunk)
 
-            self.ui_queue.put(("vision_done", None))
-            self.ui_queue.put(("stage_done", None))
+            self._bridge.push("vision_done")
+            self._bridge.push("stage", {"text": "✓ 翻译完成", "tone": "success"})
             logging.info("截图直译完成（流式）")
         except Exception as e:
             logging.error("截图直译失败:\n%s", traceback.format_exc())
-            self.ui_queue.put(("vision_delta", f"\n[截图直译失败: {e}]"))
-            self.ui_queue.put(("vision_done", None))
+            self._bridge.push("vision_delta", f"\n[截图直译失败: {e}]")
+            self._bridge.push("vision_done")
 
     def _get_foreground_rect(self):
         """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。
@@ -819,7 +543,7 @@ class App:
         if not hwnd:
             return None
 
-        # 排除本工具自己的窗口（主面板/悬浮窗）
+        # 排除本工具自己的窗口（覆盖层/webview 面板）
         GA_ROOT = 2
         my_windows = set()
         for wid in App.window_ids:
@@ -828,6 +552,9 @@ class App:
                 my_windows.add(user32.GetAncestor(wid, GA_ROOT))
             except Exception:
                 pass
+        wh = getattr(self, "_webview_hwnd", None)
+        if wh:
+            my_windows.add(wh)
         if hwnd in my_windows:
             return None
 
@@ -847,16 +574,14 @@ class App:
         进入游戏窗口时默认关闭自动翻译（F6/按钮手动触发，F9 恢复自动）。"""
         region = self._get_foreground_rect()
         if not region:
-            self.status_var.set("请先点击游戏窗口，再按 F7（工具自身窗口会被排除）")
+            self._status("请先点击游戏窗口，再按 F7（工具自身窗口会被排除）")
             return
-        # 本工具进程是 DPI Aware 的，GetClientRect/ClientToScreen 返回物理像素
         self.config.region = region
         # 进入游戏窗口：默认关闭自动翻译，仅手动触发（F6/按钮），F9 可恢复
         self.config.set(False, "auto_translate")
         self.config.save()
         self.paused = True
-        self.pause_btn.config(text="恢复 (F9)")
-        self.status_var.set(f"监控中 · 游戏窗口 {region}（自动翻译已关闭）")
+        self._status(f"监控中 · 游戏窗口 {region}（自动翻译已关闭）")
         self._positioned_history = []  # 换了监控区域，清空旧译文
         self._set_stage("⏸ 自动翻译已关闭\nF6/F5 手动 · F9 恢复自动")
         self.start_monitor()
@@ -864,6 +589,7 @@ class App:
             self._do_toggle_overlay_mode()
         else:
             self.overlay.update_status(self.translator.backend, self.paused)
+        self._push_state()
 
     def _on_win_key(self):
         """Win 键智能屏蔽：游戏窗口在前台时吞掉（防游戏误触），
@@ -872,7 +598,6 @@ class App:
         user32 = ctypes.windll.user32
         if self._game_hwnd and user32.GetForegroundWindow() == self._game_hwnd:
             return  # 游戏前台：吞掉
-        # 非游戏前台：转发 Win 键（原按键已被热键吞掉，这里重新注入）
         KEYEVENTF_KEYUP = 0x0002
         user32.keybd_event(VK_LWIN, 0, 0, 0)
         user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
@@ -893,10 +618,11 @@ class App:
             )
             self.config.region = region_phys
             self._game_hwnd = None  # 框选区域与游戏窗口不再对应，回退屏幕截图模式
-            self.status_var.set(f"监控中 · 区域 {region_phys}")
+            self._status(f"监控中 · 区域 {region_phys}")
             self._set_stage("● 监控中")
             self.start_monitor()
             self.overlay.update_status(self.translator.backend, self.paused)
+            self._push_state()
 
     def toggle_pause(self):
         self.root.after(0, self._do_toggle_pause)
@@ -908,11 +634,11 @@ class App:
                 self.monitor.pause()
             else:
                 self.monitor.resume()
-        self.pause_btn.config(text="恢复 (F9)" if self.paused else "暂停 (F9)")
         self.config.set(not self.paused, "auto_translate")  # 状态跨重启保存
         self.config.save()
         self._set_stage(self._monitor_status_text())
         self.overlay.update_status(self.translator.backend, self.paused)
+        self._push_state()
 
     # ---------- 悬浮窗模式切换（F11） ----------
 
@@ -930,9 +656,9 @@ class App:
         self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
         App.window_ids.append(self.overlay.win.winfo_id())
         self.overlay.update_status(self.translator.backend, self.paused)
-        self._refresh_mode_btn()
         self._last_positioned_key = None  # 切换后强制重新翻译一次
         self._positioned_history = []
+        self._push_state()
 
     # ---------- 生命周期 ----------
 
@@ -945,14 +671,15 @@ class App:
         except Exception:
             pass
         self.config.save()
-        self.root.destroy()
+        self.ui_queue.put(("shutdown",))
 
     def run(self):
         # 已有保存区域（含全屏模式）则直接开始监控
         if self.config.region:
-            self.status_var.set(f"监控中 · {self._region_text(self.config.region)}")
+            self._status(f"监控中 · {self._region_text(self.config.region)}")
             self.start_monitor()
         self.overlay.update_status(self.translator.backend, self.paused)
+        self._push_state()
 
         hotkey_bindings = {
             VK_F5: self.vision_translate_async,
@@ -971,6 +698,68 @@ class App:
         self._hotkeys.start()
 
         self.root.mainloop()
+
+
+def _find_webview_hwnd():
+    """枚举顶层窗口，找到 pywebview（WebView2）控制面板窗口句柄"""
+    import ctypes
+    import ctypes.wintypes
+
+    user32 = ctypes.windll.user32
+    result = []
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+
+    @WNDENUMPROC
+    def callback(hwnd, _):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length > 0:
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if buf.value == "游戏实时翻译" and user32.IsWindowVisible(hwnd):
+                result.append(hwnd)
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return result[0] if result else None
+
+
+def main():
+    import webview
+
+    bridge = EventBridge()
+    holder = {}
+    ready = threading.Event()
+
+    def tk_main():
+        # tkinter 在子线程内创建并 mainloop（覆盖层载体）
+        app = App(bridge)
+        holder["app"] = app
+        ready.set()
+        try:
+            app.run()
+        except Exception:
+            logging.error("tk 侧异常:\n%s", traceback.format_exc())
+
+    threading.Thread(target=tk_main, daemon=True).start()
+    ready.wait(timeout=15)
+    app = holder.get("app")
+    if app is None:
+        raise RuntimeError("tk 侧初始化失败")
+
+    api = PyApi(lambda: holder["app"])
+    ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
+    win = webview.create_window(
+        "游戏实时翻译", ui_path, js_api=api,
+        width=1180, height=620, min_size=(860, 480),
+        background_color="#14141f",
+    )
+    win.events.closed += app.on_close
+    win.events.shown += lambda: setattr(app, "_webview_hwnd", _find_webview_hwnd() or 0)
+    bridge.attach(win)
+    webview.start()  # 主线程消息循环（阻塞至窗口关闭）
+
+    # webview 关闭后让 tk 侧退出
+    app.ui_queue.put(("shutdown",))
 
 
 if __name__ == "__main__":
@@ -998,4 +787,4 @@ if __name__ == "__main__":
             logging.error("凭据管理器失败:\n%s", traceback.format_exc())
         logging.info("=== 自测结束，详见同目录 game-translator.log ===")
     else:
-        App().run()
+        main()
