@@ -171,3 +171,8 @@ class PyApi:
         if win:
             win.minimize()
         return True
+
+    def set_output_alpha(self, alpha):
+        """输出面板透明度：悬停时前端调 1.0（不透明），移开恢复 0.85"""
+        self._app_provider()._set_output_alpha(float(alpha))
+        return True

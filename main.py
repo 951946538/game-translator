@@ -702,7 +702,8 @@ class App:
     # ---------- 输出面板窗口（第二窗口，固定尺寸，显示/隐藏切换） ----------
 
     def _toggle_output_window(self, force_hide=False):
-        """显示/隐藏输出面板窗口。窗口常驻（隐藏保活），Vue 状态与历史记录不丢失。"""
+        """显示/隐藏输出面板窗口。窗口常驻（隐藏保活），Vue 状态与历史记录不丢失。
+        显示时定位到屏幕右上角并应用半透明（悬停由前端恢复不透明）。"""
         wins = self._wins_provider()
         if not wins:
             return
@@ -714,12 +715,38 @@ class App:
                 win.hide()
                 self._output_open = False
             else:
+                # 定位到屏幕右上角（逻辑像素，pywebview 内部处理 DPI）
+                try:
+                    sw = int(win.evaluate_js("screen.width") or 1920)
+                    win.move(max(20, sw - 880), 20)
+                except Exception:
+                    pass
                 win.show()
                 self._output_open = True
+                # 窗口显示需要一点时间，稍后应用半透明
+                threading.Timer(0.3, lambda: self._set_output_alpha(0.85)).start()
             logging.info("输出面板%s", "显示" if self._output_open else "隐藏")
             self._bridge.push("output_state", {"open": self._output_open}, target="main")
         except Exception:
             logging.error("输出面板切换失败:\n%s", traceback.format_exc())
+
+    def _set_output_alpha(self, alpha=0.85):
+        """输出面板整体半透明（Win32 LWA_ALPHA）；alpha=1.0 恢复不透明。
+        pywebview 无透明度 API，直接对窗口句柄设置分层属性。"""
+        import ctypes
+        try:
+            hwnd = getattr(self, "_panel_hwnd", None) or _find_webview_hwnd("输出面板")
+            if not hwnd:
+                return
+            self._panel_hwnd = hwnd
+            user32 = ctypes.windll.user32
+            GWL_EXSTYLE, WS_EX_LAYERED, LWA_ALPHA = -20, 0x00080000, 0x00000002
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if alpha < 1.0 and not (style & WS_EX_LAYERED):
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
+            user32.SetLayeredWindowAttributes(hwnd, 0, max(1, int(alpha * 255)), LWA_ALPHA)
+        except Exception:
+            logging.error("设置面板透明度失败:\n%s", traceback.format_exc())
 
     def _keep_on_top_loop(self):
         """每 5 秒用 Win32 直设置顶（HWND_TOPMOST）。不用 pywebview 的 on_top：

@@ -300,6 +300,14 @@ createApp({
              newLive, newChat, chatList, liveList, askInput, ask, askAbout };
   },
 }).mount("#app");
+
+// 悬停恢复不透明，移开恢复半透明（看内容时永远清晰，平时不挡游戏）
+document.addEventListener("mouseenter", () => {
+  if (window.pywebview && pywebview.api) pywebview.api.set_output_alpha(1.0);
+});
+document.addEventListener("mouseleave", () => {
+  if (window.pywebview && pywebview.api) pywebview.api.set_output_alpha(0.85);
+});
 </script>
 </body>
 </html>
