@@ -25,7 +25,6 @@
   }
   #app { display: flex; flex-direction: column; }
 
-  /* 无边框标题栏（easy_drag 拖动） */
   .titlebar {
     display: flex; align-items: center; gap: 10px;
     padding: 10px 12px 4px; user-select: none;
@@ -45,8 +44,7 @@
   .t-btn:hover { background: var(--input-hover); }
   .t-btn.close:hover { background: #e5484d; color: #fff; }
 
-  /* ===== Tab 栏 ===== */
-  .tabs { display: flex; gap: 6px; padding: 12px 16px 0; }
+  .tabs { display: flex; gap: 6px; padding: 10px 16px 0; }
   .tab {
     border: none; background: transparent; color: var(--text-dim);
     font-family: inherit; font-size: 13px; padding: 9px 18px; cursor: pointer;
@@ -64,19 +62,18 @@
     line-height: 15px; text-align: center;
   }
 
-  /* ===== 内容区 ===== */
   .content { flex: 1; min-height: 0; background: var(--panel); margin: 0 16px 14px; border-radius: 0 12px 12px 12px; display: flex; flex-direction: column; }
   .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
-  /* 翻译历史 */
   .list { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
   .list::-webkit-scrollbar { width: 8px; }
   .list::-webkit-scrollbar-thumb { background: var(--input); border-radius: 4px; }
+
   .card {
     background: var(--panel-solid); border: 1px solid rgba(255,255,255,.06);
     border-radius: 12px; padding: 12px 14px; animation: in .25s ease;
   }
-  @keyframes in { from { opacity: 0; transform: translateY(-6px); } }
+  @keyframes in { from { opacity: 0; transform: translateY(6px); } }
   .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   .card-title { font-size: 11px; font-weight: 600; color: var(--purple); }
   .card-time { font-size: 10px; color: var(--text-dim); margin-left: auto; }
@@ -84,6 +81,32 @@
   .orig { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; line-height: 1.5; white-space: pre-wrap; }
   .body { font-size: 13px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
   .q { font-size: 13px; color: var(--accent); margin-bottom: 8px; line-height: 1.5; }
+
+  /* 思考过程：默认折叠 */
+  .reasoning { margin-bottom: 8px; }
+  .r-toggle {
+    display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+    font-size: 11px; color: var(--text-dim); padding: 4px 8px;
+    background: rgba(49,50,68,.5); border-radius: 7px; user-select: none;
+  }
+  .r-toggle:hover { color: var(--text); }
+  .r-toggle .arr { font-size: 9px; transition: transform .15s; display: inline-block; }
+  .r-toggle.open .arr { transform: rotate(90deg); }
+  .r-toggle .thinking { color: #e0af68; }
+  .r-body {
+    font-size: 11.5px; color: var(--text-dim); line-height: 1.6;
+    background: rgba(0,0,0,.18); border-radius: 8px;
+    padding: 8px 10px; margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+  }
+
+  /* 截图追问按钮 */
+  .followup {
+    border: 1px solid rgba(137,180,250,.35); background: rgba(137,180,250,.12);
+    color: var(--accent); font-size: 11px; font-family: inherit;
+    border-radius: 7px; padding: 4px 10px; cursor: pointer; margin-top: 8px;
+  }
+  .followup:hover { background: rgba(137,180,250,.25); }
+
   .cursor {
     display: inline-block; width: 7px; height: 15px; margin-left: 2px;
     background: var(--accent); vertical-align: text-bottom; border-radius: 1px;
@@ -93,8 +116,20 @@
   .empty { flex: 1; display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; color: var(--text-dim); font-size: 12px; }
   .empty .big { font-size: 32px; opacity: .4; }
 
-  /* 对话输入 */
-  .ask-bar { display: flex; gap: 8px; padding: 12px; border-top: 1px solid rgba(255,255,255,.06); }
+  /* 输入区 */
+  .ask-zone { padding: 10px 12px 12px; border-top: 1px solid rgba(255,255,255,.06); }
+  .attach-preview {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+    background: rgba(137,180,250,.1); border: 1px solid rgba(137,180,250,.3);
+    border-radius: 8px; padding: 6px 8px; font-size: 11.5px; color: var(--accent);
+  }
+  .attach-preview img { width: 54px; height: 34px; object-fit: cover; border-radius: 5px; }
+  .attach-preview .x {
+    margin-left: auto; border: none; background: transparent; color: var(--text-dim);
+    cursor: pointer; font-size: 13px;
+  }
+  .attach-preview .x:hover { color: #f38ba8; }
+  .ask-bar { display: flex; gap: 8px; }
   .ask-bar input {
     flex: 1; background: var(--input); border: 1px solid transparent; border-radius: 10px;
     padding: 0 14px; height: 40px; color: var(--text); font-size: 13px; font-family: inherit; outline: none;
@@ -118,6 +153,7 @@
     <button class="t-btn" title="最小化" onclick="pywebview.api.minimize_output()">—</button>
     <button class="t-btn close" title="隐藏" onclick="pywebview.api.close_output()">✕</button>
   </div>
+
   <div class="tabs">
     <button class="tab" :class="{active: tab==='live'}" @click="tab='live'">
       实时翻译<span v-if="newLive" class="n">{{ newLive }}</span>
@@ -128,10 +164,10 @@
   </div>
 
   <div class="content">
-    <!-- Tab 1: 实时翻译（OCR 链路历史） -->
+    <!-- Tab 1: 实时翻译 -->
     <div v-show="tab==='live'" class="pane">
-      <div class="list">
-        <div v-if="!live.length" class="empty"><div class="big">🎮</div>按 F6/F7 翻译游戏画面<br>原文/译文对照记录在这里</div>
+      <div class="list" ref="liveList">
+        <div v-if="!live.length" class="empty"><div class="big">🎮</div>按 F6/F7 翻译游戏画面<br>原文/译文对照记录在这里（从上往下读）</div>
         <div v-for="c in live" :key="c.id" class="card">
           <div class="card-head"><span class="card-title">翻译</span><span class="card-time">{{ c.time }}</span></div>
           <div class="orig">{{ c.original }}</div>
@@ -142,75 +178,126 @@
 
     <!-- Tab 2: 截图直译 + AI 对话 -->
     <div v-show="tab==='chat'" class="pane">
-      <div class="list">
-        <div v-if="!chat.length" class="empty"><div class="big">✨</div>按 F5 截图直译（整屏发视觉模型）<br>或在下方输入框向 AI 提问（可勾选带画面）</div>
+      <div class="list" ref="chatList">
+        <div v-if="!chat.length" class="empty"><div class="big">✨</div>按 F5 截图直译，或直接提问<br>截图卡片上的「💬 追问」可针对该图继续提问</div>
         <div v-for="c in chat" :key="c.id" class="card">
           <div class="card-head"><span class="card-title">{{ c.title }}</span><span class="card-time">{{ c.time }}</span></div>
           <img v-if="c.thumb" :src="c.thumb">
           <div v-if="c.question" class="q">❓ {{ c.question }}</div>
-          <div class="body">{{ c.body }}<span v-if="c.streaming" class="cursor"></span></div>
+          <div v-if="c.reasoning" class="reasoning">
+            <div class="r-toggle" :class="{open: c.showReasoning}" @click="c.showReasoning = !c.showReasoning">
+              <span class="arr">▶</span>
+              <span :class="{thinking: c.streaming && !c.content}">{{ c.streaming && !c.content ? '思考中…' : '思考过程' }}</span>
+            </div>
+            <div v-show="c.showReasoning" class="r-body">{{ c.reasoning }}</div>
+          </div>
+          <div v-if="c.content || c.streaming" class="body">{{ c.content }}<span v-if="c.streaming && c.content" class="cursor"></span></div>
+          <button v-if="c.thumb && !c.streaming" class="followup" @click="askAbout(c)">💬 对这张图提问</button>
         </div>
       </div>
-      <div class="ask-bar">
-        <input v-model="question" placeholder="问 AI：游戏的任何问题（攻略/名词/画面内容…）"
-               @keydown.enter="ask" ref="askInput">
-        <label class="chk"><input type="checkbox" v-model="withImage">带画面</label>
-        <button class="ask-btn" @click="ask">提问</button>
+
+      <div class="ask-zone">
+        <div v-if="attachedImage" class="attach-preview">
+          <img :src="attachedImage">
+          <span>将针对这张截图提问</span>
+          <button class="x" @click="attachedImage = null">✕</button>
+        </div>
+        <div class="ask-bar">
+          <input v-model="question" :placeholder="attachedImage ? '针对上面的截图输入问题…' : '问 AI：游戏的任何问题（攻略/名词/画面内容…）'"
+                 @keydown.enter="ask" ref="askInput">
+          <label class="chk" v-if="!attachedImage"><input type="checkbox" v-model="withImage">带画面</label>
+          <button class="ask-btn" @click="ask">{{ attachedImage ? '发送' : '提问' }}</button>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
 <script>
-const { createApp, ref, watch } = Vue;
+const { createApp, ref, watch, nextTick } = Vue;
 
 createApp({
   setup() {
     const tab = ref("chat");
-    const live = ref([]);       // 实时翻译历史
-    const chat = ref([]);       // 截图直译 + 对话
+    const live = ref([]);
+    const chat = ref([]);
     const question = ref("");
     const withImage = ref(false);
-    const newLive = ref(0);     // 未查看的新记录计数
+    const attachedImage = ref(null);   // 引用的历史截图（data URI）
+    const newLive = ref(0);
     const newChat = ref(0);
+    const chatList = ref(null);
+    const liveList = ref(null);
+    const askInput = ref(null);
     let uid = 0;
     const now = () => new Date().toTimeString().slice(0, 8);
 
-    // 切到某 tab 即视为已查看，清零计数
-    watch(tab, t => { if (t === "live") newLive.value = 0; else newChat.value = 0; });
+    function scrollBottom() {
+      nextTick(() => {
+        const el = tab.value === "chat" ? chatList.value : liveList.value;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    }
+
+    watch(tab, t => {
+      if (t === "live") newLive.value = 0;
+      else newChat.value = 0;
+      scrollBottom();
+    });
 
     // Python → JS 事件入口（EventBridge 注入）
     window.__pyEvents = function(events) {
+      let needScroll = false;
       for (const [kind, data] of events) {
         if (kind === "translation") {
-          live.value.unshift({ id: ++uid, time: now(), original: data.original, translated: data.translated });
-          if (live.value.length > 100) live.value.pop();
+          live.value.push({ id: ++uid, time: now(), original: data.original, translated: data.translated });
+          if (live.value.length > 100) live.value.shift();  // 旧的先出（正序）
           if (tab.value !== "live") newLive.value++;
+          else needScroll = true;
         } else if (kind === "vision_start") {
-          chat.value.unshift({ id: ++uid, time: now(), title: "截图直译", thumb: data.thumb, body: "", streaming: true });
+          chat.value.push({ id: ++uid, time: now(), title: "截图直译", thumb: data.thumb,
+                            reasoning: "", content: "", streaming: true, showReasoning: false });
+          if (chat.value.length > 60) chat.value.shift();
           if (tab.value !== "chat") newChat.value++;
+          else needScroll = true;
         } else if (kind === "ask_start") {
-          chat.value.unshift({ id: ++uid, time: now(), title: "问 AI", thumb: data.thumb, question: data.question, body: "", streaming: true });
+          chat.value.push({ id: ++uid, time: now(), title: "问 AI", thumb: data.thumb,
+                            question: data.question, reasoning: "", content: "", streaming: true, showReasoning: false });
+          if (chat.value.length > 60) chat.value.shift();
           if (tab.value !== "chat") newChat.value++;
+          else needScroll = true;
         } else if (kind === "vision_delta") {
-          const c = chat.value[0];
-          if (c && c.streaming) c.body += data;
+          const c = chat.value[chat.value.length - 1];
+          if (c && c.streaming) {
+            if (data.type === "reasoning") c.reasoning += data.text;
+            else c.content += data.text;
+          }
+          if (tab.value === "chat") needScroll = true;
         } else if (kind === "vision_done") {
-          const c = chat.value[0];
+          const c = chat.value[chat.value.length - 1];
           if (c) c.streaming = false;
         }
       }
+      if (needScroll) scrollBottom();
     };
+
+    function askAbout(c) {
+      attachedImage.value = c.thumb;
+      tab.value = "chat";
+      nextTick(() => askInput.value && askInput.value.focus());
+    }
 
     function ask() {
       const q = question.value.trim();
       if (!q) return;
+      pywebview.api.ask(q, false, attachedImage.value);
       question.value = "";
-      tab.value = "chat";
-      pywebview.api.ask(q, withImage.value);
+      attachedImage.value = null;
+      scrollBottom();
     }
 
-    return { tab, live, chat, question, withImage, newLive, newChat, ask };
+    return { tab, live, chat, question, withImage, attachedImage,
+             newLive, newChat, chatList, liveList, askInput, ask, askAbout };
   },
 }).mount("#app");
 </script>

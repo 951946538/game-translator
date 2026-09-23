@@ -101,13 +101,17 @@ class PyApi:
             return True
         return False
 
-    def ask(self, question, with_image=False):
-        """问 AI（输出面板 Tab2 输入框触发）"""
+    def ask(self, question, with_image=False, image_data=None):
+        """问 AI。image_data = 引用的历史截图（data URI），优先于现场截图"""
         app = self._app_provider()
         question = (question or "").strip()
         if not question:
             return False
-        threading.Thread(target=app._ask_worker, args=(question, bool(with_image)), daemon=True).start()
+        threading.Thread(
+            target=app._ask_worker,
+            args=(question, bool(with_image), image_data or None),
+            daemon=True,
+        ).start()
         return True
 
     def save_api_key(self, base_url, key):

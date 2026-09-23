@@ -475,11 +475,14 @@ class App:
         if question:
             threading.Thread(target=self._ask_worker, args=(question, with_image), daemon=True).start()
 
-    def _ask_worker(self, question, with_image=False):
+    def _ask_worker(self, question, with_image=False, image_b64=None):
         try:
             thumb = None
             frame = None
-            if with_image and self.monitor:
+            if image_b64:
+                # 引用历史截图提问：直接用该图，无需重新截图
+                thumb = image_b64
+            elif with_image and self.monitor:
                 self._bridge.push("stage", {"text": "⟳ 截图发送中…", "tone": "warn"})
                 frame = self.monitor.clean_grab()
                 if frame is not None:
@@ -488,26 +491,18 @@ class App:
             self._bridge.push("stage", {"text": "⟳ AI 回答中…", "tone": "warn"})
             self._bridge.push("ask_start", {"question": question, "thumb": thumb})
 
-            got_reasoning = got_content = False
-            for kind, chunk in vision.ask_stream(question, frame, self.config, with_image):
-                if kind == "reasoning":
-                    if not got_reasoning:
-                        got_reasoning = True
-                        self._bridge.push("vision_delta", "──── 思考过程 ────\n")
-                    self._bridge.push("vision_delta", chunk)
-                else:
-                    if not got_content:
-                        got_content = True
-                        if got_reasoning:
-                            self._bridge.push("vision_delta", "\n\n──── 回答 ────\n")
-                    self._bridge.push("vision_delta", chunk)
+            for kind, chunk in vision.ask_stream(
+                question, frame, self.config,
+                with_image=with_image or bool(image_b64), image_b64=image_b64,
+            ):
+                self._bridge.push("vision_delta", {"type": kind, "text": chunk})
 
             self._bridge.push("vision_done")
             self._bridge.push("stage", {"text": "✓ 回答完成", "tone": "success"})
-            logging.info("问 AI 完成（%s）", "带画面" if with_image else "纯文本")
+            logging.info("问 AI 完成（%s）", "引用截图" if image_b64 else ("带画面" if with_image else "纯文本"))
         except Exception as e:
             logging.error("问 AI 失败:\n%s", traceback.format_exc())
-            self._bridge.push("vision_delta", f"\n[问 AI 失败: {e}]")
+            self._bridge.push("vision_delta", {"type": "content", "text": f"\n[问 AI 失败: {e}]"})
             self._bridge.push("vision_done")
 
     def _vision_worker(self):
@@ -524,26 +519,15 @@ class App:
             self._bridge.push("vision_start", {"thumb": thumb})
             logging.info("截图直译：发送 %dx%d 给视觉模型（流式）", frame.shape[1], frame.shape[0])
 
-            got_reasoning = got_content = False
             for kind, chunk in vision.translate_screenshot_stream(frame, self.config):
-                if kind == "reasoning":
-                    if not got_reasoning:
-                        got_reasoning = True
-                        self._bridge.push("vision_delta", "──── 思考过程 ────\n")
-                    self._bridge.push("vision_delta", chunk)
-                else:
-                    if not got_content:
-                        got_content = True
-                        if got_reasoning:
-                            self._bridge.push("vision_delta", "\n\n──── 译文 ────\n")
-                    self._bridge.push("vision_delta", chunk)
+                self._bridge.push("vision_delta", {"type": kind, "text": chunk})
 
             self._bridge.push("vision_done")
             self._bridge.push("stage", {"text": "✓ 翻译完成", "tone": "success"})
             logging.info("截图直译完成（流式）")
         except Exception as e:
             logging.error("截图直译失败:\n%s", traceback.format_exc())
-            self._bridge.push("vision_delta", f"\n[截图直译失败: {e}]")
+            self._bridge.push("vision_delta", {"type": "content", "text": f"\n[截图直译失败: {e}]"})
             self._bridge.push("vision_done")
 
     def _get_foreground_rect(self):

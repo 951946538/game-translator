@@ -75,12 +75,18 @@ def translate_screenshot_stream(frame_rgb, cfg):
     )
 
 
-def ask_stream(question, frame_rgb, cfg, with_image=False):
-    """流式问 AI：with_image=True 时把当前游戏截图一并交给视觉模型，
-    可回答"画面里这个按钮是什么"这类问题；否则纯文本走 llm 模型。"""
-    if with_image and frame_rgb is not None:
+def ask_stream(question, frame_rgb, cfg, with_image=False, image_b64=None):
+    """流式问 AI。
+    with_image=True 时附图：优先用 image_b64（引用历史截图提问），
+    否则现场截取 frame_rgb；纯文本走 llm 模型。"""
+    b64 = None
+    if with_image:
+        if image_b64:
+            b64 = image_b64.split(",", 1)[1] if image_b64.startswith("data:") else image_b64
+        elif frame_rgb is not None:
+            b64 = encode_screenshot(frame_rgb)
+    if b64:
         model = cfg.get("vision", "model", default="deepseek-v4-flash-vision-exp")
-        b64 = encode_screenshot(frame_rgb)
         content = [
             {"type": "text", "text": question},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
