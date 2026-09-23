@@ -689,18 +689,25 @@ class App:
             logging.error("输出面板切换失败:\n%s", traceback.format_exc())
 
     def _keep_on_top_loop(self):
-        """每 5 秒重申两个 webview 窗口置顶（全屏游戏等会抢走置顶属性）。
-        注意：pywebview 的 on_top 是 property，必须赋值（win.on_top = True），
-        函数式调用 win.on_top(True) 实际是取值后当函数调，会静默失败。"""
+        """每 5 秒用 Win32 直设置顶（HWND_TOPMOST）。不用 pywebview 的 on_top：
+        其内部走 WinForms 属性跨线程赋值不可靠（异常被吞，置顶从未生效）。"""
+        import ctypes
+        user32 = ctypes.windll.user32
+        HWND_TOPMOST = -1
+        SWP_NOMOVE, SWP_NOSIZE = 0x0002, 0x0001
         while True:
             time.sleep(5)
             try:
-                wins = self._wins_provider() or {}
-                for win in wins.values():
-                    if win:
-                        win.on_top = True
+                hwnds = [self._webview_hwnd]
+                # 输出面板窗（可见时才需要置顶）
+                panel_hwnd = _find_webview_hwnd("输出面板")
+                if panel_hwnd:
+                    hwnds.append(panel_hwnd)
+                for hwnd in hwnds:
+                    if hwnd and user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
+                        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
             except Exception:
-                pass
+                logging.error("置顶循环异常:\n%s", traceback.format_exc())
 
     # ---------- 生命周期 ----------
 
@@ -742,8 +749,8 @@ class App:
         self.root.mainloop()
 
 
-def _find_webview_hwnd():
-    """枚举顶层窗口，找到 pywebview（WebView2）控制面板窗口句柄"""
+def _find_webview_hwnd(title="游戏实时翻译"):
+    """枚举顶层窗口，按标题查找 pywebview（WebView2）窗口句柄"""
     import ctypes
     import ctypes.wintypes
 
@@ -757,7 +764,7 @@ def _find_webview_hwnd():
         if length > 0:
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
-            if buf.value == "游戏实时翻译" and user32.IsWindowVisible(hwnd):
+            if buf.value == title and user32.IsWindowVisible(hwnd):
                 result.append(hwnd)
         return True
 
@@ -795,13 +802,13 @@ def main():
     # 主控制窗（固定尺寸 348x620，无边框，永不做 resize）
     win_main = webview.create_window(
         "游戏实时翻译", os.path.join(ui_dir, "index.html"), js_api=api,
-        x=80, y=100, width=348, height=620, frameless=True,
+        x=80, y=100, width=348, height=620, frameless=True, on_top=True,
         background_color="#14141f",
     )
     # 输出面板窗（固定尺寸 860x640，隐藏启动，Vue 双 tab）
     win_panel = webview.create_window(
         "输出面板", os.path.join(ui_dir, "panel.html"), js_api=api,
-        x=444, y=100, width=860, height=640, frameless=True, hidden=True,
+        x=444, y=100, width=860, height=640, frameless=True, hidden=True, on_top=True,
         background_color="#14141f",
     )
     wins["main"] = win_main
