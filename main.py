@@ -511,6 +511,43 @@ class App:
             self._bridge.push("vision_delta", {"type": "content", "text": f"\n[截图直译失败: {e}]"})
             self._bridge.push("vision_done")
 
+    @staticmethod
+    def _process_elevated(pid):
+        """指定进程是否以管理员权限运行。无法判断返回 None。
+        UIPI 规则：普通权限进程无法抓取管理员权限窗口（F7 失败的常见原因）"""
+        import ctypes
+        import ctypes.wintypes as wintypes
+        kernel32 = ctypes.windll.kernel32
+        advapi32 = ctypes.windll.advapi32
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcessToken.restype = wintypes.BOOL
+        try:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                return None
+            try:
+                token = wintypes.HANDLE()
+                if not advapi32.OpenProcessToken(h, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                    return None
+                try:
+                    elev = wintypes.DWORD()
+                    ret_len = wintypes.DWORD()
+                    if advapi32.GetTokenInformation(token, 20, ctypes.byref(elev), 4, ctypes.byref(ret_len)):
+                        return bool(elev.value)  # TokenElevation
+                finally:
+                    kernel32.CloseHandle(token)
+            finally:
+                kernel32.CloseHandle(h)
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def _self_elevated(cls):
+        import ctypes
+        return bool(cls._process_elevated(ctypes.windll.kernel32.GetCurrentProcessId()))
+
     def _get_foreground_rect(self):
         """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。
         无法获取或目标是自己时返回 None"""
@@ -520,19 +557,45 @@ class App:
         user32 = ctypes.windll.user32
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
+            logging.warning("F7 诊断: GetForegroundWindow 返回空（无前台窗口？）")
             return None
+
+        # ---- 诊断信息：窗口标题 / 类名 / PID / 权限（写入 exe 旁日志，排障用）----
+        try:
+            pid = ctypes.wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            n = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(max(n + 1, 64))
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            cls_buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, cls_buf, 64)
+            logging.info(
+                "F7 诊断: 前台窗口 标题[%s] 类[%s] pid=%d 本工具管理员=%s 目标管理员=%s",
+                buf.value, cls_buf.value, pid.value,
+                self._self_elevated(), self._process_elevated(pid.value),
+            )
+        except Exception:
+            logging.info("F7 诊断: 前台窗口信息获取失败", exc_info=True)
 
         # 排除本工具自己的窗口（tk 覆盖层 + webview 主控/输出面板）
         if hwnd in self.wm.exclude_hwnds():
+            logging.info("F7 诊断: 前台是本工具自身窗口，已排除")
             return None
 
         rect = ctypes.wintypes.RECT()
         if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            logging.warning("F7 诊断: GetClientRect 失败（窗口可能已关闭）")
             return None
         pt = ctypes.wintypes.POINT(0, 0)
         user32.ClientToScreen(hwnd, ctypes.byref(pt))
         w, h = rect.right - rect.left, rect.bottom - rect.top
         if w < 100 or h < 100:
+            logging.warning("F7 诊断: 客户区尺寸 %dx%d 过小，忽略", w, h)
+            return None
+        # UIPI 检测：目标窗口管理员权限而本工具普通权限 → 抓取会被系统静默拒绝
+        if self._process_elevated(pid.value) and not self._self_elevated():
+            logging.warning("F7 诊断: 游戏以管理员权限运行，本工具为普通权限，无法捕获窗口")
+            self._status("游戏以管理员运行，本工具权限不足：请右键 GameTranslator.exe 以管理员身份运行")
             return None
         self._game_hwnd = hwnd  # 记住游戏窗口，用于 Win 键智能屏蔽
         return (pt.x, pt.y, w, h)
