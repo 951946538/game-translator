@@ -187,3 +187,8 @@ class PyApi:
         """输出面板形态：'lyrics'（桌面歌词横条）/ 'normal'（常规面板），由歌词 tab 驱动"""
         self._app_provider()._set_panel_shape(str(shape))
         return True
+
+    def toggle_overlay_visible(self):
+        """显示/隐藏覆盖层译文（实时翻译 tab 工具栏开关）"""
+        self._app_provider()._toggle_overlay_visible()
+        return True

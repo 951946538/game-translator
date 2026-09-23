@@ -116,6 +116,7 @@ class App:
         self._wins_provider = wins_provider or (lambda: {})  # () -> {name: pywebview window}
         self._webview_hwnd = 0            # 主控制窗句柄（截图涂黑排除/F7 排除用）
         self._output_open = False         # 输出面板窗口显示态
+        self._overlay_hidden = False      # 覆盖层译文显示开关（输出面板工具栏控制）
         self.config = Config()
         self.translator = Translator(self.config)
 
@@ -218,9 +219,19 @@ class App:
         self._bridge.push("state", {
             "paused": self.paused,
             "overlay_mode": self.overlay_mode,
+            "overlay_hidden": self._overlay_hidden,
             "region": list(self.config.region) if self.config.region and self.config.region != "fullscreen" else self.config.region,
             "status": self._status_text,
         })
+
+    def _toggle_overlay_visible(self):
+        """显示/隐藏覆盖层译文（隐藏时清空覆盖层，恢复时重绘历史译文）"""
+        self._overlay_hidden = not self._overlay_hidden
+        if self._overlay_hidden:
+            self.ui_queue.put(("positioned", []))  # 清空指令必须执行（poll 不拦截空列表）
+        else:
+            self.ui_queue.put(("positioned", list(self._positioned_history)))
+        self._push_state()
 
     def _set_stage(self, text, tone="info", revert_to=None, revert_ms=2000):
         """大字状态（翻译流程实时提示）；revert_to 给定时自动回落"""
@@ -460,7 +471,10 @@ class App:
                 item = self.ui_queue.get_nowait()
                 kind = item[0]
                 if kind == "positioned":
-                    self.overlay.update_positioned(item[1])
+                    _, positioned = item
+                    # 空列表=清空指令总是执行；非空且已隐藏时跳过（保持隐藏）
+                    if positioned or not self._overlay_hidden:
+                        self.overlay.update_positioned(positioned)
                 elif kind == "translation":
                     _, original, translated = item
                     self.overlay.update_translation(translated, self.translator.backend, self.paused)
@@ -747,7 +761,7 @@ class App:
         except Exception:
             sw, sh = 1920, 1080
         if getattr(self, "_panel_shape", "normal") == "lyrics":
-            w = min(1100, int(sw * 0.62))
+            w = min(1500, int(sw * 0.85))
             h = 170
             win.resize(w, h)
             win.move((sw - w) // 2, max(20, sh - h - 60))

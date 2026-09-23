@@ -184,11 +184,14 @@
   </div>
 
   <div class="toolbar">
-    <button class="tb purple" @click="py('f5')">截图直译<span class="k">F5</span></button>
-    <button class="tb green" @click="py('f6')">立即翻译<span class="k">F6</span></button>
-    <button class="tb blue" @click="py('f7')">游戏窗口<span class="k">F7</span></button>
-    <button class="tb" @click="py('f9')">{{ paused ? '恢复自动' : '暂停自动' }}<span class="k">F9</span></button>
-    <button class="tb" @click="py('f11')">显示: {{ modeLabel }}<span class="k">F11</span></button>
+    <template v-if="tab==='live'">
+      <button class="tb green" @click="py('f6')">立即翻译<span class="k">F6</span></button>
+      <button class="tb" @click="toggleOverlayText">{{ overlayHidden ? '👁 显示译文' : '🙈 隐藏译文' }}</button>
+      <button class="tb" @click="py('f9')">自动翻译: {{ paused ? '关' : '开' }}<span class="k">F9</span></button>
+    </template>
+    <template v-else-if="tab==='chat'">
+      <button class="tb purple" @click="py('f5')">截图直译<span class="k">F5</span></button>
+    </template>
   </div>
 
   <div class="tabs">
@@ -279,10 +282,12 @@ createApp({
     const paused = ref(false);
     const modeLabel = ref("覆盖原文");
     const MODE_LABELS = { inplace: "覆盖原文", panel: "独立面板" };
+    const overlayHidden = ref(false);
     const lyricText = ref("");
     const shape = ref("normal");
 
     function py(name) { pywebview.api.action(name); }
+    function toggleOverlayText() { pywebview.api.toggle_overlay_visible(); }
     const chatList = ref(null);
     const liveList = ref(null);
     const askInput = ref(null);
@@ -316,6 +321,7 @@ createApp({
         if (kind === "state") {
           if (data.paused !== undefined) paused.value = data.paused;
           if (data.overlay_mode) modeLabel.value = MODE_LABELS[data.overlay_mode] || data.overlay_mode;
+          if (data.overlay_hidden !== undefined) overlayHidden.value = data.overlay_hidden;
         }
         else if (kind === "lyrics") {
           lyricText.value = data;
@@ -369,7 +375,7 @@ createApp({
 
     return { tab, live, chat, question, withImage, attachedImage,
              newLive, newChat, chatList, liveList, askInput, ask, askAbout,
-             paused, modeLabel, lyricText, py };
+             paused, modeLabel, overlayHidden, lyricText, py, toggleOverlayText };
   },
 }).mount("#app");
 
