@@ -201,12 +201,12 @@ class App:
         })
 
     def _toggle_overlay_visible(self):
-        """显示/隐藏覆盖层译文（隐藏时清空覆盖层，恢复时重绘历史译文）"""
+        """显示/隐藏译文（两种模式都生效：覆盖层清空/重绘；独立面板收起/恢复）"""
         self._overlay_hidden = not self._overlay_hidden
         if self._overlay_hidden:
-            self.ui_queue.put(("positioned", []))  # 清空指令必须执行（poll 不拦截空列表）
+            self.ui_queue.put(("overlay_hide", None))
         else:
-            self.ui_queue.put(("positioned", list(self._positioned_history)))
+            self.ui_queue.put(("overlay_show", list(self._positioned_history)))
         self._push_state()
 
     def _set_stage(self, text, tone="info", revert_to=None, revert_ms=2000):
@@ -266,11 +266,11 @@ class App:
         force=True 为 F6 手动触发，暂停状态下依然执行。"""
         if not self.paused or force:
             if force:
-                # 手动翻译 = 翻译当前画面：清空旧译文（避免场景切换后残留），
-                # 立即刷新覆盖层（识别为空时也能清掉残留），重置去重键允许重译相同文本
+                # 手动翻译 = 翻译当前画面：清空旧译文（避免场景切换后残留，
+                # 覆盖层与独立面板都清），重置去重键允许重译相同文本
                 self._positioned_history = []
                 self._last_positioned_key = None
-                self.ui_queue.put(("positioned", []))
+                self.ui_queue.put(("overlay_clear", None))
             self._bridge.push("stage", {"text": "⟳ 正在识别…", "tone": "warn"})
             self.ocr_queue.put((frame, origin))
 
@@ -402,9 +402,18 @@ class App:
                     # 空列表=清空指令总是执行；非空且已隐藏时跳过（保持隐藏）
                     if positioned or not self._overlay_hidden:
                         self.overlay.update_positioned(positioned)
+                elif kind == "overlay_clear":
+                    # F6 手动翻译前清残留（覆盖层清画布；独立面板清文本）
+                    self.overlay.clear_translation()
+                elif kind == "overlay_hide":
+                    self.overlay.set_visible(False)
+                elif kind == "overlay_show":
+                    _, positioned = item
+                    self.overlay.set_visible(True, positioned)
                 elif kind == "translation":
                     _, original, translated = item
-                    self.overlay.update_translation(translated, self.translator.backend, self.paused)
+                    if not self._overlay_hidden:  # 隐藏期间新译文不唤醒面板
+                        self.overlay.update_translation(translated, self.translator.backend, self.paused)
                 elif kind == "shutdown":
                     self.root.destroy()
                     return
@@ -695,6 +704,8 @@ class App:
         self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
         App.window_ids.append(self.overlay.win.winfo_id())
         self.overlay.update_status(self.translator.backend, self.paused)
+        if self._overlay_hidden:
+            self.overlay.set_visible(False)  # 切换模式后保持隐藏状态
         self._last_positioned_key = None  # 切换后强制重新翻译一次
         self._positioned_history = []
         self._set_stage(f"显示: {self._MODE_LABEL[self.overlay_mode]}", "success")

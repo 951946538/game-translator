@@ -114,6 +114,34 @@ class OverlayWindow:
         self.text_var.set(text or "（未识别到文本）")
         self.win.deiconify()
 
+    # ---------- 通用控制（两种模式都生效） ----------
+
+    def clear_translation(self):
+        """清除译文内容（F6 手动翻译前清残留）：
+        覆盖模式清空画布；面板模式清空文本"""
+        try:
+            if self.mode == "inplace":
+                self.update_positioned([])
+            else:
+                self.text_var.set("等待画面内容…")
+        except tk.TclError:
+            pass  # 窗口已销毁
+
+    def set_visible(self, visible, positioned=None):
+        """显示/隐藏译文（两种模式都生效）：
+        覆盖模式：隐藏清空画布，显示重绘历史译文块；
+        面板模式：隐藏收起窗口，显示恢复窗口（文本仍在）"""
+        try:
+            if self.mode == "inplace":
+                self.update_positioned(positioned or [])
+            else:
+                if visible:
+                    self.win.deiconify()
+                else:
+                    self.win.withdraw()
+        except tk.TclError:
+            pass
+
     # ---------- 覆盖模式 ----------
 
     def _make_clickthrough(self):
