@@ -747,7 +747,7 @@ class App:
                 win.show()
                 self._output_open = True
                 # 窗口显示需要一点时间，稍后应用半透明
-                threading.Timer(0.3, lambda: self._set_output_alpha(0.85)).start()
+                threading.Timer(0.3, lambda: self._set_output_alpha(0.7)).start()
             logging.info("输出面板%s", "显示" if self._output_open else "隐藏")
             self._bridge.push("output_state", {"open": self._output_open}, target="main")
         except Exception:
@@ -788,7 +788,7 @@ class App:
         pywebview 无透明度 API，直接对窗口句柄设置分层属性。"""
         self._apply_window_alpha("输出面板", alpha, cache_attr="_panel_hwnd")
 
-    def _set_main_alpha(self, alpha=0.92):
+    def _set_main_alpha(self, alpha=0.8):
         """主控窗透明度（悬停恢复不透明，移开恢复半透明）"""
         if self._webview_hwnd:
             self._apply_window_alpha(None, alpha, hwnd=self._webview_hwnd)
@@ -954,7 +954,7 @@ def main():
         except Exception:
             pass
         if hwnd:
-            app._apply_window_alpha(None, 0.92, hwnd=hwnd)
+            app._apply_window_alpha(None, 0.8, hwnd=hwnd)
         logging.info("主控制窗句柄: %s", hwnd or "未找到！")
 
     win_main.events.shown += _on_main_shown

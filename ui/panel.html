@@ -73,6 +73,16 @@
   }
   .lyrics-text .hint { font-size: 12px; color: var(--text-dim); }
 
+  /* 歌词形态的返回出口：右上角悬停浮现（平时半隐不挡视线） */
+  .lyrics-exit {
+    position: fixed; top: 6px; right: 8px; z-index: 60;
+    background: rgba(49,50,68,.75); color: var(--text-dim);
+    border: none; border-radius: 7px; padding: 5px 12px;
+    font-size: 11.5px; cursor: pointer; font-family: inherit;
+    opacity: .35; transition: all .15s;
+  }
+  .lyrics-exit:hover { opacity: 1; color: var(--text); }
+
   .tabs { display: flex; gap: 6px; padding: 10px 16px 0; }
   .tab {
     border: none; background: transparent; color: var(--text-dim);
@@ -259,10 +269,11 @@
       <div class="lyrics-pane">
         <div class="lyrics-text">
           <template v-if="lyricText">{{ lyricText }}</template>
-          <span v-else class="hint">切到本页窗口已变为歌词条 · 按 F6 翻译后对话主文本显示在这里<br>（窗口可拖动，移开鼠标后半透明）</span>
+          <span v-else class="hint">按 F6 翻译后对话主文本显示在这里（窗口可拖动）<br>右上角「☰ 展开」切回完整面板</span>
         </div>
       </div>
     </div>
+    <button v-show="tab==='lyrics'" class="lyrics-exit" @click="tab='chat'">☰ 展开</button>
   </div>
 </div>
 
@@ -392,7 +403,7 @@ document.addEventListener("mouseenter", () => {
   if (window.pywebview && pywebview.api) pywebview.api.set_output_alpha(1.0);
 });
 document.addEventListener("mouseleave", () => {
-  if (window.pywebview && pywebview.api) pywebview.api.set_output_alpha(0.85);
+  if (window.pywebview && pywebview.api) pywebview.api.set_output_alpha(0.7);
 });
 </script>
 </body>
