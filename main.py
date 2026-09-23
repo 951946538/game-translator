@@ -118,6 +118,7 @@ class App:
         self._docked = None               # 当前贴边侧（None/“left”/“right”）
         self._saved_win_rect = None       # 收缩前窗口位置尺寸（展开恢复用）
         self._panel_expanded = False      # 主面板右侧区域展开态（默认收起，悬停展开）
+        self._ui_scale = 1.0              # WebView DPI 缩放（devicePixelRatio，shown 后更新）
         self.config = Config()
         self.translator = Translator(self.config)
 
@@ -673,7 +674,7 @@ class App:
     # ---------- 贴边收缩（无边框主窗口） ----------
 
     def _edge_watch_loop(self):
-        """每 0.5s 检查主窗口是否贴靠屏幕左右边缘（≤40px）→ 收缩成竖条。
+        """每 0.5s 检查主窗口是否贴靠屏幕左右边缘（≤40 逻辑像素）→ 收缩成竖条。
         轮询方式：不依赖拖动回调（easy_drag 的结束时机拿不到），任何方式贴边都生效。"""
         import ctypes
         import ctypes.wintypes
@@ -687,17 +688,20 @@ class App:
                 hwnd = self._webview_hwnd
                 if not hwnd:
                     continue
+                scale = getattr(self, "_ui_scale", 1.0) or 1.0
                 user32 = ctypes.windll.user32
                 rect = ctypes.wintypes.RECT()
                 if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
                     continue
                 sw = user32.GetSystemMetrics(0)
-                if rect.right - rect.left < 100:
+                win_w = rect.right - rect.left
+                if win_w < int(100 * scale):
                     continue  # 已是收缩态（外部改变尺寸的场景）
-                if rect.right - rect.left > 400:
+                if win_w > int(400 * scale):
                     continue  # 宽态（右侧区域展开）不参与贴边收缩，避免与面板展开互相打架
+                threshold = int(40 * scale)
                 left_gap, right_gap = rect.left, sw - rect.right
-                if left_gap <= 40 or right_gap <= 40:
+                if left_gap <= threshold or right_gap <= threshold:
                     side = "left" if left_gap <= right_gap else "right"
                     self._dock(side, rect, sw)
             except Exception:
@@ -716,8 +720,9 @@ class App:
         return True
 
     def _dock(self, side, rect, screen_w):
+        scale = getattr(self, "_ui_scale", 1.0) or 1.0
         self._saved_win_rect = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
-        dock_w, dock_h = 46, 260
+        dock_w, dock_h = int(46 * scale), int(260 * scale)
         y = max(0, (rect.top + rect.bottom) // 2 - dock_h // 2)
         if not self._set_window_pos(0 if side == "left" else screen_w - dock_w, y, dock_w, dock_h):
             return
@@ -731,12 +736,14 @@ class App:
         import ctypes
         user32 = ctypes.windll.user32
         sw = user32.GetSystemMetrics(0)
-        x, y, w, h = self._saved_win_rect or (200, 200, 348, 620)
+        scale = getattr(self, "_ui_scale", 1.0) or 1.0
+        margin = int(60 * scale)
+        x, y, w, h = self._saved_win_rect or (200, 200, int(348 * scale), int(620 * scale))
         # 恢复位置若仍在边缘附近，往屏幕内侧偏移（否则轮询会立即又收缩）
-        if x < 60:
-            x = 60
-        if x + w > sw - 60:
-            x = max(60, sw - 60 - w)
+        if x < margin:
+            x = margin
+        if x + w > sw - margin:
+            x = max(margin, sw - margin - w)
         if not self._set_window_pos(x, y, w, h):
             return
         self._docked = None
@@ -746,12 +753,12 @@ class App:
 
     # ---------- 主面板宽窄切换（右侧区域 hover 展开） ----------
 
-    PANEL_WIDE_W = 1180    # 展开态：左列 + 右侧历史/提问区
-    PANEL_COMPACT_W = 348  # 收起态：仅左列，右缘显示触发竖条
+    PANEL_WIDE_W = 1180    # 展开态宽（逻辑像素，与 CSS 布局一致）
+    PANEL_COMPACT_W = 348  # 收起态宽（逻辑像素：仅左列 + 右缘触发竖条）
 
     def _expand_panel(self, expanded):
         """切换主面板宽窄：Win32 SetWindowPos 一次原子设置位置+尺寸。
-        不用 pywebview 的 resize+move（两步异步有中间态闪跳，且坐标语义可能经 DPI 换算漂移）。"""
+        尺寸按逻辑像素定义，设置时乘 DPI 缩放（devicePixelRatio）转物理像素。"""
         if expanded == getattr(self, "_panel_expanded", None):
             return
         try:
@@ -764,12 +771,13 @@ class App:
             rect = ctypes.wintypes.RECT()
             if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
                 return
+            scale = getattr(self, "_ui_scale", 1.0) or 1.0
             x, y, h = rect.left, rect.top, rect.bottom - rect.top
-            w = self.PANEL_WIDE_W if expanded else self.PANEL_COMPACT_W
+            w = int((self.PANEL_WIDE_W if expanded else self.PANEL_COMPACT_W) * scale)
             SWP_NOZORDER = 0x0004
             user32.SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER)
             self._panel_expanded = expanded
-            logging.info("主面板%s（%dx%d@%d,%d）", "展开" if expanded else "收起", w, h, x, y)
+            logging.info("主面板%s（%dx%d@%d,%d, scale=%.2f）", "展开" if expanded else "收起", w, h, x, y, scale)
         except Exception:
             logging.error("面板宽窄切换失败:\n%s", traceback.format_exc())
 
@@ -882,7 +890,18 @@ def main():
     )
     win_holder["win"] = win
     win.events.closed += app.on_close
-    win.events.shown += lambda: setattr(app, "_webview_hwnd", _find_webview_hwnd() or 0)
+
+    def _on_shown():
+        hwnd = _find_webview_hwnd()
+        app._webview_hwnd = hwnd or 0
+        try:
+            # WebView 的 DPI 缩放（面板尺寸换算：逻辑像素 × scale = 物理像素）
+            app._ui_scale = float(win.evaluate_js("window.devicePixelRatio") or 1.0)
+        except Exception:
+            app._ui_scale = 1.0
+        logging.info("webview 窗口句柄: %s, DPI 缩放: %.2f", hwnd or "未找到！", app._ui_scale)
+
+    win.events.shown += _on_shown
     bridge.attach(win)
     webview.start()  # 主线程消息循环（阻塞至窗口关闭）
 
