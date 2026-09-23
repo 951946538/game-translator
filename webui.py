@@ -117,6 +117,61 @@ class PyApi:
         ).start()
         return True
 
+    # ---------- 窗口选择器（绕开热键/前台限制的捕获入口） ----------
+
+    def list_windows(self):
+        """枚举当前打开的可见顶层窗口（排除本工具自身），供「选择窗口」列表展示"""
+        import ctypes
+        import ctypes.wintypes as wintypes
+        app = self._app_provider()
+        user32 = ctypes.windll.user32
+        exclude = app.wm.exclude_hwnds()
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        result = []
+
+        @WNDENUMPROC
+        def cb(hwnd, _):
+            try:
+                if not hwnd or not user32.IsWindowVisible(hwnd) or hwnd in exclude:
+                    return True
+                # 工具窗/无边框辅助窗（输入体验等）不需要
+                if user32.GetWindowLongW(hwnd, -20) & 0x80:  # WS_EX_TOOLWINDOW
+                    return True
+                rect = wintypes.RECT()
+                if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    return True
+                w, h = rect.right - rect.left, rect.bottom - rect.top
+                if w < 200 or h < 120:  # 最小化（坐标 -32000）或太小的窗口
+                    return True
+                n = user32.GetWindowTextLengthW(hwnd)
+                if n <= 0:
+                    return True
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                title = buf.value.strip()
+                if not title or title.startswith("Windows 输入体验"):
+                    return True
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                result.append({"hwnd": int(hwnd), "title": title, "pid": int(pid.value)})
+            except Exception:
+                pass
+            return True
+
+        user32.EnumWindows(cb, 0)
+        return result
+
+    def capture_window(self, hwnd):
+        """捕获指定窗口（「选择窗口」列表点选后调用）"""
+        app = self._app_provider()
+        try:
+            hwnd = int(hwnd)
+        except (TypeError, ValueError):
+            return False
+        app.root.after(0, lambda: app.do_capture_foreground(hwnd=hwnd))
+        return True
+
     def save_api_key(self, base_url, key):
         """保存 API 设置：地址进 config.json，密钥进 Windows 凭据管理器"""
         app = self._app_provider()

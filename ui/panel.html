@@ -83,6 +83,32 @@
   }
   .lyrics-exit:hover { opacity: 1; color: var(--text); }
 
+  /* 窗口选择器模态 */
+  .wp-mask {
+    position: fixed; inset: 0; z-index: 80;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(3px);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .wp-modal {
+    width: min(520px, 90%); max-height: 70%;
+    background: var(--panel-solid, #181825); border: 1px solid rgba(255,255,255,.08);
+    border-radius: 14px; padding: 16px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .wp-modal h3 { font-size: 14px; color: var(--accent); }
+  .wp-modal .hint { font-size: 11px; color: var(--text-dim); }
+  .wp-list { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .wp-list::-webkit-scrollbar { width: 8px; }
+  .wp-list::-webkit-scrollbar-thumb { background: var(--input); border-radius: 4px; }
+  .wp-item {
+    padding: 10px 12px; border-radius: 9px; background: var(--input);
+    font-size: 12.5px; cursor: pointer; transition: background .12s;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .wp-item:hover { background: var(--input-hover, #45475a); }
+  .wp-item .pid { color: var(--text-dim); font-size: 10px; margin-left: 8px; }
+  .wp-empty { font-size: 12px; color: var(--text-dim); text-align: center; padding: 20px 0; }
+
   .tabs { display: flex; gap: 6px; padding: 10px 16px 0; }
   .tab {
     border: none; background: transparent; color: var(--text-dim);
@@ -195,6 +221,7 @@
 
   <div class="toolbar">
     <template v-if="tab==='live'">
+      <button class="tb blue" @click="openWinPicker">🪟 选择窗口</button>
       <button class="tb green" @click="py('f6')">立即翻译<span class="k">F6</span></button>
       <button class="tb" @click="toggleOverlayText">{{ overlayHidden ? '👁 显示译文' : '🙈 隐藏译文' }}</button>
       <button class="tb" @click="py('f9')">自动翻译: {{ paused ? '关' : '开' }}<span class="k">F9</span></button>
@@ -274,6 +301,20 @@
       </div>
     </div>
     <button v-show="tab==='lyrics'" class="lyrics-exit" @click="tab='chat'">☰ 展开</button>
+
+    <!-- 窗口选择器（点击选择要翻译的窗口，不依赖热键/前台） -->
+    <div v-if="winPicker" class="wp-mask" @click.self="winPicker = false">
+      <div class="wp-modal">
+        <h3>选择要翻译的窗口</h3>
+        <div class="hint">点击游戏窗口开始捕获（本工具自身窗口已隐藏）</div>
+        <div class="wp-list">
+          <div v-for="w in winList" :key="w.hwnd" class="wp-item" :title="w.title" @click="pickWindow(w)">
+            {{ w.title }}<span class="pid">#{{ w.pid }}</span>
+          </div>
+          <div v-if="!winList.length" class="wp-empty">没找到可捕获的窗口</div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -299,6 +340,22 @@ createApp({
 
     function py(name) { pywebview.api.action(name); }
     function toggleOverlayText() { pywebview.api.toggle_overlay_visible(); }
+
+    // ---------- 窗口选择器 ----------
+    const winPicker = ref(false);
+    const winList = ref([]);
+    async function openWinPicker() {
+      try {
+        winList.value = (await pywebview.api.list_windows()) || [];
+      } catch (e) {
+        winList.value = [];
+      }
+      winPicker.value = true;
+    }
+    async function pickWindow(w) {
+      winPicker.value = false;
+      try { await pywebview.api.capture_window(w.hwnd); } catch (e) {}
+    }
     const chatList = ref(null);
     const liveList = ref(null);
     const askInput = ref(null);
@@ -386,7 +443,8 @@ createApp({
 
     return { tab, live, chat, question, withImage, attachedImage,
              newLive, newChat, chatList, liveList, askInput, ask, askAbout,
-             paused, modeLabel, overlayHidden, lyricText, py, toggleOverlayText };
+             paused, modeLabel, overlayHidden, lyricText, py, toggleOverlayText,
+             winPicker, winList, openWinPicker, pickWindow };
   },
 }).mount("#app");
 

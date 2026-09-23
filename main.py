@@ -548,17 +548,19 @@ class App:
         import ctypes
         return bool(cls._process_elevated(ctypes.windll.kernel32.GetCurrentProcessId()))
 
-    def _get_foreground_rect(self):
-        """获取前台窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。
+    def _get_foreground_rect(self, hwnd=None):
+        """获取游戏窗口客户区的屏幕物理坐标 (x, y, w, h)，并记录游戏窗口句柄。
+        hwnd=None 取前台窗口（F7）；指定 hwnd 用于「选择窗口」列表捕获。
         无法获取或目标是自己时返回 None"""
         import ctypes
         import ctypes.wintypes
 
         user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            logging.warning("F7 诊断: GetForegroundWindow 返回空（无前台窗口？）")
-            return None
+        if hwnd is None:
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                logging.warning("F7 诊断: GetForegroundWindow 返回空（无前台窗口？）")
+                return None
 
         # ---- 诊断信息：窗口标题 / 类名 / PID / 权限（写入 exe 旁日志，排障用）----
         try:
@@ -600,12 +602,13 @@ class App:
         self._game_hwnd = hwnd  # 记住游戏窗口，用于 Win 键智能屏蔽
         return (pt.x, pt.y, w, h)
 
-    def do_capture_foreground(self):
-        """游戏窗口模式：捕获前台窗口客户区（自动排除桌面/任务栏），仅翻译游戏内容。
+    def do_capture_foreground(self, hwnd=None):
+        """游戏窗口模式：捕获前台窗口（或指定窗口）客户区，仅翻译游戏内容。
         进入游戏窗口时默认关闭自动翻译（F6/按钮手动触发，F9 恢复自动）。"""
-        region = self._get_foreground_rect()
+        region = self._get_foreground_rect(hwnd)
         if not region:
-            self._status("请先点击游戏窗口，再按 F7（工具自身窗口会被排除）")
+            if hwnd is None:
+                self._status("请先点击游戏窗口，再按 F7（或用「选择窗口」按钮选取）")
             return
         self.config.region = region
         # 进入游戏窗口：默认关闭自动翻译，仅手动触发（F6/按钮），F9 可恢复
