@@ -858,9 +858,10 @@ if __name__ == "__main__":
             logging.error("OCR 引擎初始化失败:\n%s", traceback.format_exc())
         try:
             from app import secrets
-            secrets.set_api_key("selftest-ok")
-            ok = secrets.get_api_key() == "selftest-ok"
-            secrets.delete_api_key()
+            # 用独立槽位测试，绝不触碰 llm 槽位的真实密钥
+            secrets.set_api_key("selftest-ok", section="selftest")
+            ok = secrets.get_api_key(section="selftest") == "selftest-ok"
+            secrets.delete_api_key(section="selftest")
             logging.info("凭据管理器: %s", "可用" if ok else "不可用")
         except Exception:
             logging.error("凭据管理器失败:\n%s", traceback.format_exc())
