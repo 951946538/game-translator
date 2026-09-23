@@ -146,7 +146,7 @@
   <button class="icon-btn" title="API 设置" onclick="openSettings()">🔑</button>
   <button class="icon-btn" title="使用说明" onclick="openHelp()">?</button>
   <button class="icon-btn" title="最小化" onclick="pywebview.api.minimize_window()">—</button>
-  <button class="icon-btn close" title="关闭" onclick="pywebview.api.close_window()">✕</button>
+  <button class="icon-btn close" title="关闭" onclick="winClose()">✕</button>
 </header>
 
 <main>
@@ -276,6 +276,12 @@
     m.addEventListener("click", e => { if (e.target === m) m.classList.remove("show"); }));
 
   // ---------- 初始化 ----------
+  const BOOT_TIME = Date.now();
+  // 启动期防护：WebView2 初始化可能合成鼠标事件（曾有残留光标位置触发误点击）
+  function winClose() {
+    if (Date.now() - BOOT_TIME < 2000) return;
+    pywebview.api.close_window();
+  }
   window.addEventListener("pywebviewready", () => {
     pywebview.api.get_state().then(s => {
       applyState(s);

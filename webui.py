@@ -131,8 +131,19 @@ class PyApi:
     # ---------- 窗口控制 ----------
 
     def close_window(self):
-        self._wins["main"].destroy()
-        return True
+        """关闭主控窗 = 退出程序。
+        做完必要清理后进程级退出（os._exit）：pywebview 对 hidden 窗口的
+        destroy 不可靠（会死锁），webview.start() 也会因隐藏窗口永不返回。"""
+        import os
+        app = self._app_provider()
+        try:
+            app.config.save()
+            app.stop_monitor()
+            if getattr(app, "_hotkeys", None):
+                app._hotkeys.stop()
+        except Exception:
+            pass
+        os._exit(0)
 
     def minimize_window(self):
         self._wins["main"].minimize()

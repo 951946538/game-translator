@@ -712,15 +712,18 @@ class App:
     # ---------- 生命周期 ----------
 
     def on_close(self):
-        self.stop_monitor()
-        self.ocr_queue.put(None)
-        self.translate_queue.put(None)
+        """主窗关闭（✕/WM_CLOSE/Alt+F4）。清理后进程级退出：
+        webview.start() 因隐藏的输出窗永不返回，destroy 隐藏窗口又会死锁，
+        因此所有退出路径统一 os._exit。"""
         try:
-            self._hotkeys.stop()
+            self.stop_monitor()
+            if getattr(self, "_hotkeys", None):
+                self._hotkeys.stop()
+            self.config.save()
         except Exception:
             pass
-        self.config.save()
         self.ui_queue.put(("shutdown",))
+        os._exit(0)
 
     def run(self):
         # 已有保存区域（含全屏模式）则直接开始监控
