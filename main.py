@@ -694,6 +694,8 @@ class App:
                 sw = user32.GetSystemMetrics(0)
                 if rect.right - rect.left < 100:
                     continue  # 已是收缩态（外部改变尺寸的场景）
+                if rect.right - rect.left > 400:
+                    continue  # 宽态（右侧区域展开）不参与贴边收缩，避免与面板展开互相打架
                 left_gap, right_gap = rect.left, sw - rect.right
                 if left_gap <= 40 or right_gap <= 40:
                     side = "left" if left_gap <= right_gap else "right"
@@ -701,37 +703,42 @@ class App:
             except Exception:
                 pass
 
+    def _set_window_pos(self, x, y, w, h):
+        """Win32 原子设置主窗口位置与尺寸（物理像素）"""
+        import ctypes
+        import ctypes.wintypes
+        hwnd = self._webview_hwnd
+        if not hwnd:
+            return False
+        user32 = ctypes.windll.user32
+        SWP_NOZORDER = 0x0004
+        user32.SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER)
+        return True
+
     def _dock(self, side, rect, screen_w):
-        win = self._win_provider()
-        if not win:
-            return
         self._saved_win_rect = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
         dock_w, dock_h = 46, 260
         y = max(0, (rect.top + rect.bottom) // 2 - dock_h // 2)
-        win.resize(dock_w, dock_h)
-        if side == "left":
-            win.move(0, y)
-        else:
-            win.move(screen_w - dock_w, y)
+        if not self._set_window_pos(0 if side == "left" else screen_w - dock_w, y, dock_w, dock_h):
+            return
         self._docked = side
         self._bridge.push("docked", {"side": side})
         logging.info("窗口已贴边收缩（%s）", side)
 
     def _expand_window(self):
-        if not self._docked or not self._win_provider:
+        if not self._docked:
             return
         import ctypes
         user32 = ctypes.windll.user32
         sw = user32.GetSystemMetrics(0)
-        win = self._win_provider()
-        x, y, w, h = self._saved_win_rect or (200, 200, 1180, 620)
+        x, y, w, h = self._saved_win_rect or (200, 200, 348, 620)
         # 恢复位置若仍在边缘附近，往屏幕内侧偏移（否则轮询会立即又收缩）
         if x < 60:
             x = 60
         if x + w > sw - 60:
             x = max(60, sw - 60 - w)
-        win.resize(w, h)
-        win.move(x, y)
+        if not self._set_window_pos(x, y, w, h):
+            return
         self._docked = None
         self._dock_exempt_until = time.time() + 3  # 豁免 3 秒
         self._bridge.push("docked", {"side": None})
@@ -743,23 +750,26 @@ class App:
     PANEL_COMPACT_W = 348  # 收起态：仅左列，右缘显示触发竖条
 
     def _expand_panel(self, expanded):
-        """切换主面板宽窄（左上角位置不变，宽度向右伸缩）"""
-        if not self._win_provider or expanded == getattr(self, "_panel_expanded", None):
+        """切换主面板宽窄：Win32 SetWindowPos 一次原子设置位置+尺寸。
+        不用 pywebview 的 resize+move（两步异步有中间态闪跳，且坐标语义可能经 DPI 换算漂移）。"""
+        if expanded == getattr(self, "_panel_expanded", None):
             return
         try:
             import ctypes
             import ctypes.wintypes
-            win = self._win_provider()
-            x, y, h = 120, 120, 620
-            if self._webview_hwnd:
-                user32 = ctypes.windll.user32
-                rect = ctypes.wintypes.RECT()
-                if user32.GetWindowRect(self._webview_hwnd, ctypes.byref(rect)):
-                    x, y, h = rect.left, rect.top, rect.bottom - rect.top
-            win.resize(self.PANEL_WIDE_W if expanded else self.PANEL_COMPACT_W, h)
-            win.move(x, y)
+            hwnd = self._webview_hwnd
+            if not hwnd:
+                return
+            user32 = ctypes.windll.user32
+            rect = ctypes.wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return
+            x, y, h = rect.left, rect.top, rect.bottom - rect.top
+            w = self.PANEL_WIDE_W if expanded else self.PANEL_COMPACT_W
+            SWP_NOZORDER = 0x0004
+            user32.SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER)
             self._panel_expanded = expanded
-            logging.info("主面板%s", "展开" if expanded else "收起")
+            logging.info("主面板%s（%dx%d@%d,%d）", "展开" if expanded else "收起", w, h, x, y)
         except Exception:
             logging.error("面板宽窄切换失败:\n%s", traceback.format_exc())
 
