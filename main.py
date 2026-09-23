@@ -50,7 +50,7 @@ from app.config import Config
 from app.capture import RegionMonitor
 from app.ocr_engine import OCREngine
 from app.translator import Translator
-from app.overlay import OverlayWindow, LyricsBar
+from app.overlay import OverlayWindow
 from app.region_select import select_region
 from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F11, VK_LWIN, VK_RWIN
 from app.textblock import group_lines
@@ -155,7 +155,9 @@ class App:
             pass
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        self.overlay_mode = self.config.get("overlay_mode", default="inplace")
+        # lyrics 现在是输出面板的 tab（不再是独立显示模式），历史配置归一到 inplace
+        mode = self.config.get("overlay_mode", default="inplace")
+        self.overlay_mode = "inplace" if mode == "lyrics" else mode
 
         # ---- 屏幕坐标系校准 ----
         self.root.update_idletasks()
@@ -428,14 +430,13 @@ class App:
                         })
                         threading.Timer(2.0, lambda: self._bridge.push(
                             "stage", {"text": self._monitor_status_text(), "tone": "info"})).start()
-                        if self.overlay_mode == "lyrics":
-                            # 歌词模式：取面积最大的块（对话主文本）显示到底部字幕条
-                            main_block = max(
-                                positioned,
-                                key=lambda p: (p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]),
-                            )
-                            self.ui_queue.put(("lyrics", main_block["text"]))
-                        else:
+                        # 歌词（输出面板「歌词」tab）：面积最大的块 = 对话主文本
+                        main_block = max(
+                            positioned,
+                            key=lambda p: (p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]),
+                        )
+                        self._bridge.push("lyrics", main_block["text"])
+                        if self.overlay_mode == "inplace":
                             self.ui_queue.put(("positioned", list(self._positioned_history)))
                         # 翻译历史：原文/译文对照推给 Web UI（文本游戏回看）
                         self._bridge.push("translation", {
@@ -460,8 +461,6 @@ class App:
                 kind = item[0]
                 if kind == "positioned":
                     self.overlay.update_positioned(item[1])
-                elif kind == "lyrics":
-                    self.overlay.update_lyrics(item[1])
                 elif kind == "translation":
                     _, original, translated = item
                     self.overlay.update_translation(translated, self.translator.backend, self.paused)
@@ -690,10 +689,11 @@ class App:
         self.overlay.update_status(self.translator.backend, self.paused)
         self._push_state()
 
-    # ---------- 悬浮窗模式切换（F11）：inplace 覆盖原文 → panel 独立面板 → lyrics 桌面歌词 ----------
+    # ---------- 悬浮窗模式切换（F11）：inplace 覆盖原文 ↔ panel 独立面板 ----------
+    # 桌面歌词现在是输出面板的「歌词」tab（窗口形态切换），不再属于 F11 模式
 
-    _MODE_CYCLE = {"inplace": "panel", "panel": "lyrics", "lyrics": "inplace"}
-    _MODE_LABEL = {"inplace": "覆盖原文", "panel": "独立面板", "lyrics": "桌面歌词"}
+    _MODE_CYCLE = {"inplace": "panel", "panel": "inplace"}
+    _MODE_LABEL = {"inplace": "覆盖原文", "panel": "独立面板"}
 
     def toggle_overlay_mode(self):
         self.root.after(0, self._do_toggle_overlay_mode)
@@ -706,10 +706,7 @@ class App:
             self.overlay.win.destroy()
         except Exception:
             pass
-        if self.overlay_mode == "lyrics":
-            self.overlay = LyricsBar(self.root, self.config)
-        else:
-            self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
+        self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
         App.window_ids.append(self.overlay.win.winfo_id())
         self.overlay.update_status(self.translator.backend, self.paused)
         self._last_positioned_key = None  # 切换后强制重新翻译一次
@@ -720,8 +717,7 @@ class App:
     # ---------- 输出面板窗口（第二窗口，固定尺寸，显示/隐藏切换） ----------
 
     def _toggle_output_window(self, force_hide=False):
-        """显示/隐藏输出面板窗口。窗口常驻（隐藏保活），Vue 状态与历史记录不丢失。
-        显示时定位到屏幕右上角并应用半透明（悬停由前端恢复不透明）。"""
+        """显示/隐藏输出面板窗口。窗口常驻（隐藏保活），Vue 状态与历史记录不丢失。"""
         wins = self._wins_provider()
         if not wins:
             return
@@ -733,12 +729,7 @@ class App:
                 win.hide()
                 self._output_open = False
             else:
-                # 定位到屏幕右上角（逻辑像素，pywebview 内部处理 DPI）
-                try:
-                    sw = int(win.evaluate_js("screen.width") or 1920)
-                    win.move(max(20, sw - 880), 20)
-                except Exception:
-                    pass
+                self._position_panel(win)
                 win.show()
                 self._output_open = True
                 # 窗口显示需要一点时间，稍后应用半透明
@@ -747,6 +738,36 @@ class App:
             self._bridge.push("output_state", {"open": self._output_open}, target="main")
         except Exception:
             logging.error("输出面板切换失败:\n%s", traceback.format_exc())
+
+    def _position_panel(self, win):
+        """按当前形态定位输出面板（逻辑像素）。lyrics=宽扁横条贴屏幕底部 / normal=右上角"""
+        try:
+            sw = int(win.evaluate_js("screen.width") or 1920)
+            sh = int(win.evaluate_js("screen.height") or 1080)
+        except Exception:
+            sw, sh = 1920, 1080
+        if getattr(self, "_panel_shape", "normal") == "lyrics":
+            w = min(1100, int(sw * 0.62))
+            h = 170
+            win.resize(w, h)
+            win.move((sw - w) // 2, max(20, sh - h - 60))
+        else:
+            win.resize(860, 640)
+            win.move(max(20, sw - 880), 20)
+
+    def _set_panel_shape(self, shape):
+        """输出面板窗口形态切换（「歌词」tab 驱动）：
+        lyrics = 桌面歌词横条（宽扁贴底部），normal = 常规面板（右上角）"""
+        wins = self._wins_provider() or {}
+        win = wins.get("panel")
+        if not win or shape == getattr(self, "_panel_shape", "normal"):
+            return
+        try:
+            self._panel_shape = shape
+            self._position_panel(win)
+            logging.info("输出面板形态: %s", shape)
+        except Exception:
+            logging.error("面板形态切换失败:\n%s", traceback.format_exc())
 
     def _set_output_alpha(self, alpha=0.85):
         """输出面板整体半透明（Win32 LWA_ALPHA）；alpha=1.0 恢复不透明。

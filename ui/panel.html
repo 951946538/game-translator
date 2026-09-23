@@ -57,6 +57,22 @@
   .tb.purple:hover, .tb.green:hover, .tb.blue:hover { filter: brightness(1.15); }
   .tb .k { font-size: 9px; opacity: .75; margin-left: 3px; }
 
+  /* 歌词形态：窗口变宽扁横条，隐藏工具栏/标签，只显示大字歌词 */
+  body.lyrics-shape .titlebar,
+  body.lyrics-shape .toolbar,
+  body.lyrics-shape .tabs { display: none; }
+  body.lyrics-shape .content { margin: 0; border-radius: 12px; }
+  .lyrics-pane {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 8px 20px;
+  }
+  .lyrics-text {
+    font-size: 21px; line-height: 1.55; text-align: center;
+    color: #f0f0f0; text-shadow: 0 1px 6px rgba(0,0,0,.6);
+    white-space: pre-wrap; word-break: break-word; max-height: 100%; overflow: hidden;
+  }
+  .lyrics-text .hint { font-size: 12px; color: var(--text-dim); }
+
   .tabs { display: flex; gap: 6px; padding: 10px 16px 0; }
   .tab {
     border: none; background: transparent; color: var(--text-dim);
@@ -182,6 +198,9 @@
     <button class="tab" :class="{active: tab==='chat'}" @click="tab='chat'">
       截图直译 · 对话<span v-if="newChat" class="n">{{ newChat }}</span>
     </button>
+    <button class="tab" :class="{active: tab==='lyrics'}" @click="tab='lyrics'">
+      歌词
+    </button>
   </div>
 
   <div class="content">
@@ -231,6 +250,16 @@
         </div>
       </div>
     </div>
+
+    <!-- Tab 3: 桌面歌词（窗口变形为宽扁横条贴屏幕底部） -->
+    <div v-show="tab==='lyrics'" class="pane">
+      <div class="lyrics-pane">
+        <div class="lyrics-text">
+          <template v-if="lyricText">{{ lyricText }}</template>
+          <span v-else class="hint">切到本页窗口已变为歌词条 · 按 F6 翻译后对话主文本显示在这里<br>（窗口可拖动，移开鼠标后半透明）</span>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -249,7 +278,9 @@ createApp({
     const newChat = ref(0);
     const paused = ref(false);
     const modeLabel = ref("覆盖原文");
-    const MODE_LABELS = { inplace: "覆盖原文", panel: "独立面板", lyrics: "桌面歌词" };
+    const MODE_LABELS = { inplace: "覆盖原文", panel: "独立面板" };
+    const lyricText = ref("");
+    const shape = ref("normal");
 
     function py(name) { pywebview.api.action(name); }
     const chatList = ref(null);
@@ -267,8 +298,15 @@ createApp({
 
     watch(tab, t => {
       if (t === "live") newLive.value = 0;
-      else newChat.value = 0;
+      else if (t === "chat") newChat.value = 0;
       scrollBottom();
+      // 歌词 tab 驱动窗口形态切换（宽扁横条 ↔ 常规面板）
+      const want = t === "lyrics" ? "lyrics" : "normal";
+      if (want !== shape.value) {
+        shape.value = want;
+        document.body.classList.toggle("lyrics-shape", want === "lyrics");
+        pywebview.api.set_panel_shape(want);
+      }
     });
 
     // Python → JS 事件入口（EventBridge 注入）
@@ -278,6 +316,9 @@ createApp({
         if (kind === "state") {
           if (data.paused !== undefined) paused.value = data.paused;
           if (data.overlay_mode) modeLabel.value = MODE_LABELS[data.overlay_mode] || data.overlay_mode;
+        }
+        else if (kind === "lyrics") {
+          lyricText.value = data;
         }
         if (kind === "translation") {
           live.value.push({ id: ++uid, time: now(), original: data.original, translated: data.translated });
@@ -328,7 +369,7 @@ createApp({
 
     return { tab, live, chat, question, withImage, attachedImage,
              newLive, newChat, chatList, liveList, askInput, ask, askAbout,
-             paused, modeLabel, py };
+             paused, modeLabel, lyricText, py };
   },
 }).mount("#app");
 

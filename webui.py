@@ -14,6 +14,7 @@ class EventBridge:
         "vision_done": ("panel",),
         "stage": ("main",),                   # 状态卡在主窗
         "state": ("main", "panel"),           # 暂停/显示模式：两窗都要（面板工具栏标签）
+        "lyrics": ("panel",),                 # 歌词 tab（输出面板）
         "output_state": ("main",),
         # 其余事件（vision_start / ask_start / translation 等）默认发两窗：
         # 主窗亮红点，输出窗渲染内容
@@ -180,4 +181,9 @@ class PyApi:
     def set_main_alpha(self, alpha):
         """主控窗透明度：悬停 1.0，移开 0.92"""
         self._app_provider()._set_main_alpha(float(alpha))
+        return True
+
+    def set_panel_shape(self, shape):
+        """输出面板形态：'lyrics'（桌面歌词横条）/ 'normal'（常规面板），由歌词 tab 驱动"""
+        self._app_provider()._set_panel_shape(str(shape))
         return True
