@@ -1,10 +1,14 @@
 """
 游戏实时翻译工具
-链路：游戏窗口/区域监控（帧差检测+变化区域裁剪）→ PaddleOCR（面板归组）
-    → LLM 翻译（逐行并发）→ 置顶覆盖层显示；F5 截图直译（视觉模型）与问 AI 走 Web UI
-UI：pywebview（HTML/JS 控制面板，webui.py 桥接）+ tkinter（覆盖层，需 Win32 透明/穿透特性）
 
-热键：F5 截图直译 | F6 立即翻译 | F7 捕获游戏窗口 | F8 框选区域 | F9 暂停/恢复 | F11 覆盖/面板
+架构：
+  UI     pywebview 双窗口（主控窗 + Vue 输出面板），webui.py 提供 JS 桥
+         tkinter 仅保留覆盖层（Win32 透明/穿透特性所必需）
+  链路   区域监控（帧差检测）→ PaddleOCR → LLM 翻译 → 覆盖层/输出面板
+  窗口   app/windows.py 集中全部 Win32 窗口操作（透明度/置顶/形态/截图排除）
+
+热键：F5 截图直译 | F6 立即翻译 | F7 捕获游戏窗口 | F8 框选区域
+      F9 暂停/恢复自动翻译 | F11 覆盖原文/独立面板
 """
 import sys
 import os
@@ -54,39 +58,10 @@ from app.overlay import OverlayWindow
 from app.region_select import select_region
 from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F11, VK_LWIN, VK_RWIN
 from app.textblock import group_lines
+from app.uifilter import is_own_ui_text
+from app.windows import WindowManager, find_hwnd, TITLE_MAIN, TITLE_PANEL
 from app import vision
 from webui import EventBridge, PyApi
-
-# 本工具自身 UI 的文案词表（OCR 兜底过滤：识别结果若全由这些词组成，说明截到了自己的面板，丢弃）
-_UI_WORDS = (
-    "f5", "f6", "f7", "f8", "f9", "f10", "f11",
-    "截图直译", "立即翻译", "游戏窗口", "框选区域", "选区", "窗口",
-    "暂停", "恢复", "后端", "显示", "覆盖原文", "独立面板",
-    "监控中", "已暂停", "等待选择区域", "捕获游戏窗口",
-    "正在识别", "正在翻译", "翻译完成", "截图发送中",
-    "视觉模型", "翻译中", "思考过程", "译文",
-    "按阅读顺序", "整屏发给", "含思考过程",
-    "llm", "deepl", "ollama",
-    "f6立即翻译", "f7窗口", "f8选区", "f9暂停", "f10后端", "f11显示",
-    "游戏实时翻译", "输出历史", "提问", "带画面", "问", "未监控", "显示切换", "游戏",
-)
-
-
-def _is_own_ui_text(text):
-    """识别文本是否来自本工具自身 UI（截图混入面板时的终极兜底）。
-    规则：规范化后能被 UI 词表完全拆解 → 是自身文案。"""
-    import re
-    norm = re.sub(r"[\s()\[\]{}:：|·，,。.\-●○✓⟳⏸]+", "", text).lower()
-    if not norm or len(norm) > 60:  # 超长 text 不可能是纯 UI 文案拼接
-        return False
-    changed = True
-    while changed and norm:
-        changed = False
-        for w in _UI_WORDS:
-            if w in norm:
-                norm = norm.replace(w, "", 1)
-                changed = True
-    return norm == ""
 
 
 def _thumb_b64(frame, width=520, quality=80):
@@ -114,7 +89,8 @@ class App:
         self._bridge = bridge
         self._status_text = ""
         self._wins_provider = wins_provider or (lambda: {})  # () -> {name: pywebview window}
-        self._webview_hwnd = 0            # 主控制窗句柄（截图涂黑排除/F7 排除用）
+        # Win32 窗口操作全部委托 WindowManager（透明度/置顶/形态/截图排除）
+        self.wm = WindowManager(self._wins_provider, lambda: App.window_ids)
         self._output_open = False         # 输出面板窗口显示态
         self._overlay_hidden = False      # 覆盖层译文显示开关（输出面板工具栏控制）
         self.config = Config()
@@ -188,8 +164,8 @@ class App:
         threading.Thread(target=self._ocr_worker, daemon=True).start()
         threading.Thread(target=self._translate_worker, daemon=True).start()
         threading.Thread(target=self._preload_ocr, daemon=True).start()
-        # 主面板置顶保持
-        threading.Thread(target=self._keep_on_top_loop, daemon=True).start()
+        # 窗口置顶保持（委托 WindowManager）
+        threading.Thread(target=self.wm.keep_on_top_loop, daemon=True).start()
         self.root.after(100, self._poll_ui_queue)
 
     def _preload_ocr(self):
@@ -254,57 +230,8 @@ class App:
             return "等待选择区域\n按 F7 捕获游戏窗口"
         return "● 监控中"
 
-    # ---------- 截图排除（涂黑自身窗口矩形） ----------
-
-    def _own_window_rects(self):
-        """本工具自身不透明窗口的屏幕物理矩形列表（截图涂黑排除用）。
-        纯 Win32 查询，线程安全；跳过全屏矩形（inplace 覆盖层是透明画布，不遮挡游戏）。"""
-        import ctypes
-        import ctypes.wintypes as wintypes
-        user32 = ctypes.windll.user32
-        GA_ROOT = 2
-        sw = user32.GetSystemMetrics(0)
-        sh = user32.GetSystemMetrics(1)
-        rects = []
-        for wid in set(App.window_ids):
-            try:
-                hwnd = user32.GetAncestor(wid, GA_ROOT) or wid
-                if not hwnd or not user32.IsWindowVisible(hwnd):
-                    continue
-                rect = wintypes.RECT()
-                if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    continue
-                rw, rh = rect.right - rect.left, rect.bottom - rect.top
-                if rw <= 0 or rh <= 0:
-                    continue
-                if rw >= sw and rh >= sh:  # inplace 全屏透明画布：跳过
-                    continue
-                rects.append((rect.left, rect.top, rw, rh))
-            except Exception:
-                pass
-        # webview 控制面板窗口（主窗口隐藏，webview 是实际可见窗口）
-        hwnd = getattr(self, "_webview_hwnd", None)
-        if hwnd:
-            try:
-                rect = wintypes.RECT()
-                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    if rect.right > rect.left and rect.bottom > rect.top:
-                        rects.append((rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
-            except Exception:
-                pass
-        # 输出面板窗口（第二窗口）：可见时同样涂黑排除，避免历史缩略图/译文混入截图
-        try:
-            panel_hwnd = _find_webview_hwnd("输出面板")
-            if panel_hwnd:
-                rect = wintypes.RECT()
-                if user32.GetWindowRect(panel_hwnd, ctypes.byref(rect)):
-                    if rect.right > rect.left and rect.bottom > rect.top:
-                        rects.append((rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
-        except Exception:
-            pass
-        return rects
-
     # ---------- 监控与翻译链路 ----------
+    # 截图排除（涂黑自身窗口矩形）见 self.wm.own_window_rects（app/windows.py）
 
     def start_monitor(self):
         self.stop_monitor()
@@ -322,7 +249,7 @@ class App:
             input_idle_ms=self.config.get("input_idle_ms", default=3000),
             min_interval_ms=self.config.get("min_translate_interval_ms", default=5000),
             game_hwnd=self._game_hwnd or 0,
-            exclude_rects_provider=self._own_window_rects,
+            exclude_rects_provider=self.wm.own_window_rects,
         )
         self._region_offset = self.monitor.offset
         self.monitor.start()
@@ -375,7 +302,7 @@ class App:
                     items = self.ocr_engine.extract_detail(frame)
                     blocks = group_lines(items, frame=frame)
                     # 兜底过滤：剔除误截到的本工具自身 UI 文案（按钮/状态文字）
-                    blocks = [b for b in blocks if not _is_own_ui_text(b.get("text", ""))]
+                    blocks = [b for b in blocks if not is_own_ui_text(b.get("text", ""))]
                     ox, oy = origin
                     for b in blocks:
                         bx = b["box"]
@@ -386,7 +313,7 @@ class App:
                         self.translate_queue.put(("positioned", blocks))
                 else:
                     text = self.ocr_engine.extract(frame)
-                    if text and not _is_own_ui_text(text):
+                    if text and not is_own_ui_text(text):
                         self._bridge.push("stage", {"text": "⟳ 正在翻译…", "tone": "warn"})
                         self.translate_queue.put(("panel", text))
             except Exception as e:
@@ -508,6 +435,16 @@ class App:
         if question:
             threading.Thread(target=self._ask_worker, args=(question, with_image), daemon=True).start()
 
+    def _stream_to_bridge(self, stream, thumb, question=None):
+        """通用流式输出（直译/问答共用）：创建卡片 → 增量推送 → 完成标记"""
+        if question is not None:
+            self._bridge.push("ask_start", {"question": question, "thumb": thumb})
+        else:
+            self._bridge.push("vision_start", {"thumb": thumb})
+        for kind, chunk in stream:
+            self._bridge.push("vision_delta", {"type": kind, "text": chunk})
+        self._bridge.push("vision_done")
+
     def _ask_worker(self, question, with_image=False, image_b64=None):
         try:
             thumb = None
@@ -522,15 +459,13 @@ class App:
                     thumb = _thumb_b64(frame)
 
             self._bridge.push("stage", {"text": "⟳ AI 回答中…", "tone": "warn"})
-            self._bridge.push("ask_start", {"question": question, "thumb": thumb})
-
-            for kind, chunk in vision.ask_stream(
-                question, frame, self.config,
-                with_image=with_image or bool(image_b64), image_b64=image_b64,
-            ):
-                self._bridge.push("vision_delta", {"type": kind, "text": chunk})
-
-            self._bridge.push("vision_done")
+            self._stream_to_bridge(
+                vision.ask_stream(
+                    question, frame, self.config,
+                    with_image=with_image or bool(image_b64), image_b64=image_b64,
+                ),
+                thumb, question=question,
+            )
             self._bridge.push("stage", {"text": "✓ 回答完成", "tone": "success"})
             logging.info("问 AI 完成（%s）", "引用截图" if image_b64 else ("带画面" if with_image else "纯文本"))
         except Exception as e:
@@ -542,16 +477,8 @@ class App:
         """F5 专用抓屏：临时隐藏自身全部窗口，等 DWM 合成更新（250ms）后
         截完整游戏画面（无涂黑块、无工具 UI 混入），截完立即恢复窗口。"""
         import ctypes
-        import ctypes.wintypes as wintypes
         user32 = ctypes.windll.user32
-
-        # 收集自身可见窗口（主控窗 + 输出面板）
-        hwnds = [self._webview_hwnd]
-        panel_hwnd = _find_webview_hwnd("输出面板")
-        if panel_hwnd:
-            hwnds.append(panel_hwnd)
-        hidden = [h for h in hwnds if h and user32.IsWindowVisible(h)]
-
+        hidden = self.wm.visible_hwnds()
         try:
             for h in hidden:
                 user32.ShowWindow(h, 0)  # SW_HIDE
@@ -567,19 +494,16 @@ class App:
             self._bridge.push("stage", {"text": "⟳ 截图发送中…", "tone": "warn"})
             frame = self._grab_full_frame()
             if frame is None:
-                self._bridge.push("vision_delta", "[截图失败]")
+                self._bridge.push("vision_delta", {"type": "content", "text": "[截图失败]"})
                 self._bridge.push("vision_done")
                 return
 
-            thumb = _thumb_b64(frame)
             self._bridge.push("stage", {"text": "⟳ 视觉模型翻译中…", "tone": "warn"})
-            self._bridge.push("vision_start", {"thumb": thumb})
             logging.info("截图直译：发送 %dx%d 给视觉模型（流式）", frame.shape[1], frame.shape[0])
-
-            for kind, chunk in vision.translate_screenshot_stream(frame, self.config):
-                self._bridge.push("vision_delta", {"type": kind, "text": chunk})
-
-            self._bridge.push("vision_done")
+            self._stream_to_bridge(
+                vision.translate_screenshot_stream(frame, self.config),
+                _thumb_b64(frame),
+            )
             self._bridge.push("stage", {"text": "✓ 翻译完成", "tone": "success"})
             logging.info("截图直译完成（流式）")
         except Exception as e:
@@ -598,26 +522,8 @@ class App:
         if not hwnd:
             return None
 
-        # 排除本工具自己的窗口（覆盖层/webview 面板）
-        GA_ROOT = 2
-        my_windows = set()
-        for wid in App.window_ids:
-            try:
-                my_windows.add(user32.GetAncestor(user32.GetParent(wid), GA_ROOT))
-                my_windows.add(user32.GetAncestor(wid, GA_ROOT))
-            except Exception:
-                pass
-        wh = getattr(self, "_webview_hwnd", None)
-        if wh:
-            my_windows.add(wh)
-        # 输出面板窗也排除（点着面板按 F7 时不应把它当游戏捕获）
-        try:
-            panel_hwnd = _find_webview_hwnd("输出面板")
-            if panel_hwnd:
-                my_windows.add(panel_hwnd)
-        except Exception:
-            pass
-        if hwnd in my_windows:
+        # 排除本工具自己的窗口（tk 覆盖层 + webview 主控/输出面板）
+        if hwnd in self.wm.exclude_hwnds():
             return None
 
         rect = ctypes.wintypes.RECT()
@@ -732,10 +638,7 @@ class App:
 
     def _toggle_output_window(self, force_hide=False):
         """显示/隐藏输出面板窗口。窗口常驻（隐藏保活），Vue 状态与历史记录不丢失。"""
-        wins = self._wins_provider()
-        if not wins:
-            return
-        win = wins.get("panel")
+        win = self.wm.get_win("panel")
         if not win:
             return
         try:
@@ -743,96 +646,22 @@ class App:
                 win.hide()
                 self._output_open = False
             else:
-                self._position_panel(win)
+                self.wm.position_panel()
                 win.show()
                 self._output_open = True
                 # 窗口显示需要一点时间，稍后应用半透明
-                threading.Timer(0.3, lambda: self._set_output_alpha(0.4)).start()
+                threading.Timer(0.3, lambda: self.wm.set_alpha(TITLE_PANEL, 0.4)).start()
             logging.info("输出面板%s", "显示" if self._output_open else "隐藏")
             self._bridge.push("output_state", {"open": self._output_open}, target="main")
         except Exception:
             logging.error("输出面板切换失败:\n%s", traceback.format_exc())
 
-    def _position_panel(self, win):
-        """按当前形态定位输出面板（逻辑像素）。lyrics=宽扁横条贴屏幕底部 / normal=右上角"""
-        try:
-            sw = int(win.evaluate_js("screen.width") or 1920)
-            sh = int(win.evaluate_js("screen.height") or 1080)
-        except Exception:
-            sw, sh = 1920, 1080
-        if getattr(self, "_panel_shape", "normal") == "lyrics":
-            w = min(1500, int(sw * 0.85))
-            h = 170
-            win.resize(w, h)
-            win.move((sw - w) // 2, max(20, sh - h - 60))
-        else:
-            win.resize(860, 640)
-            win.move((sw - 860) // 2, max(20, (sh - 640) // 2))  # 屏幕正中央
-
     def _set_panel_shape(self, shape):
-        """输出面板窗口形态切换（「歌词」tab 驱动）：
-        lyrics = 桌面歌词横条（宽扁贴底部），normal = 常规面板（右上角）"""
-        wins = self._wins_provider() or {}
-        win = wins.get("panel")
-        if not win or shape == getattr(self, "_panel_shape", "normal"):
-            return
+        """输出面板窗口形态切换（「歌词」tab 驱动），委托 WindowManager"""
         try:
-            self._panel_shape = shape
-            self._position_panel(win)
-            logging.info("输出面板形态: %s", shape)
+            self.wm.set_panel_shape(shape)
         except Exception:
             logging.error("面板形态切换失败:\n%s", traceback.format_exc())
-
-    def _set_output_alpha(self, alpha=0.85):
-        """输出面板整体半透明（Win32 LWA_ALPHA）；alpha=1.0 恢复不透明。
-        pywebview 无透明度 API，直接对窗口句柄设置分层属性。"""
-        self._apply_window_alpha("输出面板", alpha, cache_attr="_panel_hwnd")
-
-    def _set_main_alpha(self, alpha=0.4):
-        """主控窗透明度（悬停恢复不透明，移开恢复半透明）"""
-        if self._webview_hwnd:
-            self._apply_window_alpha(None, alpha, hwnd=self._webview_hwnd)
-
-    def _apply_window_alpha(self, title, alpha, cache_attr=None, hwnd=None):
-        """对 pywebview 窗口应用整体透明度（Win32 分层窗口）"""
-        import ctypes
-        try:
-            if hwnd is None:
-                hwnd = (getattr(self, cache_attr, None) if cache_attr else None) \
-                    or (title and _find_webview_hwnd(title))
-                if not hwnd:
-                    return
-                if cache_attr:
-                    setattr(self, cache_attr, hwnd)
-            user32 = ctypes.windll.user32
-            GWL_EXSTYLE, WS_EX_LAYERED, LWA_ALPHA = -20, 0x00080000, 0x00000002
-            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            if alpha < 1.0 and not (style & WS_EX_LAYERED):
-                user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
-            user32.SetLayeredWindowAttributes(hwnd, 0, max(1, int(alpha * 255)), LWA_ALPHA)
-        except Exception:
-            logging.error("设置窗口透明度失败:\n%s", traceback.format_exc())
-
-    def _keep_on_top_loop(self):
-        """每 5 秒用 Win32 直设置顶（HWND_TOPMOST）。不用 pywebview 的 on_top：
-        其内部走 WinForms 属性跨线程赋值不可靠（异常被吞，置顶从未生效）。"""
-        import ctypes
-        user32 = ctypes.windll.user32
-        HWND_TOPMOST = -1
-        SWP_NOMOVE, SWP_NOSIZE = 0x0002, 0x0001
-        while True:
-            time.sleep(5)
-            try:
-                hwnds = [self._webview_hwnd]
-                # 输出面板窗（可见时才需要置顶）
-                panel_hwnd = _find_webview_hwnd("输出面板")
-                if panel_hwnd:
-                    hwnds.append(panel_hwnd)
-                for hwnd in hwnds:
-                    if hwnd and user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
-                        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-            except Exception:
-                logging.error("置顶循环异常:\n%s", traceback.format_exc())
 
     # ---------- 生命周期 ----------
 
@@ -875,29 +704,6 @@ class App:
         self._hotkeys.start()
 
         self.root.mainloop()
-
-
-def _find_webview_hwnd(title="游戏实时翻译"):
-    """枚举顶层窗口，按标题查找 pywebview（WebView2）窗口句柄"""
-    import ctypes
-    import ctypes.wintypes
-
-    user32 = ctypes.windll.user32
-    result = []
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
-
-    @WNDENUMPROC
-    def callback(hwnd, _):
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length > 0:
-            buf = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buf, length + 1)
-            if buf.value == title and user32.IsWindowVisible(hwnd):
-                result.append(hwnd)
-        return True
-
-    user32.EnumWindows(callback, 0)
-    return result[0] if result else None
 
 
 def main():
@@ -945,17 +751,11 @@ def main():
     win_main.events.closed += app.on_close
 
     def _on_main_shown():
-        hwnd = _find_webview_hwnd()
-        app._webview_hwnd = hwnd or 0
-        # 定位屏幕右上角（逻辑像素）+ 半透明
-        try:
-            sw = int(win_main.evaluate_js("screen.width") or 1920)
-            win_main.move(max(20, sw - 320), 20)
-        except Exception:
-            pass
-        if hwnd:
-            app._apply_window_alpha(None, 0.4, hwnd=hwnd)
-        logging.info("主控制窗句柄: %s", hwnd or "未找到！")
+        app.wm.main_hwnd = find_hwnd(TITLE_MAIN)
+        app.wm.position_main()
+        if app.wm.main_hwnd:
+            app.wm.set_alpha(TITLE_MAIN, 0.4, hwnd=app.wm.main_hwnd)
+        logging.info("主控制窗句柄: %s", app.wm.main_hwnd or "未找到！")
 
     win_main.events.shown += _on_main_shown
     bridge.attach("main", win_main)

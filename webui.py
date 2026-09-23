@@ -4,6 +4,8 @@ import queue
 import threading
 import time
 
+from app.windows import TITLE_MAIN, TITLE_PANEL
+
 
 class EventBridge:
     """Python → JS 事件推送：按路由表分发到各窗口，批量合并高频增量（流式 delta）"""
@@ -174,13 +176,15 @@ class PyApi:
         return True
 
     def set_output_alpha(self, alpha):
-        """输出面板透明度：悬停时前端调 1.0（不透明），移开恢复 0.85"""
-        self._app_provider()._set_output_alpha(float(alpha))
+        """输出面板透明度：悬停时前端调 1.0（不透明），移开恢复 0.4"""
+        app = self._app_provider()
+        app.wm.set_alpha(TITLE_PANEL, float(alpha))
         return True
 
     def set_main_alpha(self, alpha):
-        """主控窗透明度：悬停 1.0，移开 0.92"""
-        self._app_provider()._set_main_alpha(float(alpha))
+        """主控窗透明度：悬停 1.0，移开 0.4"""
+        app = self._app_provider()
+        app.wm.set_alpha(TITLE_MAIN, float(alpha), hwnd=app.wm.main_hwnd)
         return True
 
     def set_panel_shape(self, shape):

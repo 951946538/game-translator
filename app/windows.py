@@ -1,0 +1,199 @@
+"""pywebview 窗口的 Win32 级管理：句柄、透明度、置顶保活、形态定位、截图排除。
+此前这些 ctypes 操作散落在 main.py 各处，集中于此避免继续腐化。"""
+import ctypes
+import ctypes.wintypes as wintypes
+import logging
+import time
+import traceback
+
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+LWA_ALPHA = 0x00000002
+
+# pywebview 窗口标题（与 create_window 的 title 一致）
+TITLE_MAIN = "游戏实时翻译"
+TITLE_PANEL = "输出面板"
+
+# 输出面板形态（逻辑像素）
+PANEL_NORMAL_SIZE = (860, 640)  # 常规面板
+PANEL_LYRICS_H = 170            # 歌词横条高度
+PANEL_LYRICS_MAX_W = 1500
+
+
+def _enum_visible_windows_by_title(title):
+    user32 = ctypes.windll.user32
+    result = []
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    @WNDENUMPROC
+    def cb(hwnd, _):
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n > 0 and user32.IsWindowVisible(hwnd):
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if buf.value == title:
+                result.append(hwnd)
+        return True
+
+    user32.EnumWindows(cb, 0)
+    return result
+
+
+def find_hwnd(title):
+    """按标题查找可见顶层窗口句柄，找不到返回 0"""
+    wins = _enum_visible_windows_by_title(title)
+    return wins[0] if wins else 0
+
+
+class WindowManager:
+    """集中管理两个 pywebview 窗口的 Win32 操作。
+    wins_provider: () -> {"main": Window, "panel": Window}
+    tk_window_ids_provider: () -> [winfo_id, ...]（tk 侧窗口，截图排除/F7 排除用）
+    """
+
+    def __init__(self, wins_provider, tk_window_ids_provider):
+        self._wins_provider = wins_provider
+        self._tk_ids = tk_window_ids_provider
+        self.main_hwnd = 0
+        self._panel_hwnd = 0
+        self.panel_shape = "normal"  # normal / lyrics（「歌词」tab 驱动）
+
+    @property
+    def panel_hwnd(self):
+        if not self._panel_hwnd:
+            self._panel_hwnd = find_hwnd(TITLE_PANEL)
+        return self._panel_hwnd
+
+    def get_win(self, name):
+        return (self._wins_provider() or {}).get(name)
+
+    # ---------- 透明度 ----------
+
+    def set_alpha(self, title, alpha, hwnd=0):
+        """整体透明度（LWA_ALPHA）。hwnd 优先，否则按标题查找。"""
+        try:
+            hwnd = hwnd or find_hwnd(title)
+            if not hwnd:
+                return
+            user32 = ctypes.windll.user32
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if alpha < 1.0 and not (style & WS_EX_LAYERED):
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
+            user32.SetLayeredWindowAttributes(hwnd, 0, max(1, int(alpha * 255)), LWA_ALPHA)
+        except Exception:
+            logging.error("设置窗口透明度失败:\n%s", traceback.format_exc())
+
+    # ---------- 置顶保活 ----------
+
+    def keep_on_top_loop(self):
+        """每 5 秒用 Win32 直设置顶（HWND_TOPMOST）。不用 pywebview 的 on_top：
+        其内部走 WinForms 属性跨线程赋值不可靠（异常被吞，置顶从未生效）。"""
+        user32 = ctypes.windll.user32
+        HWND_TOPMOST = -1
+        SWP_NOMOVE, SWP_NOSIZE = 0x0002, 0x0001
+        while True:
+            time.sleep(5)
+            try:
+                for hwnd in (self.main_hwnd, self.panel_hwnd):
+                    if hwnd and user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
+                        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+            except Exception:
+                logging.error("置顶循环异常:\n%s", traceback.format_exc())
+
+    # ---------- 输出面板形态与定位 ----------
+
+    def position_main(self):
+        """主控窗定位：屏幕右上角（逻辑像素）"""
+        win = self.get_win("main")
+        if not win:
+            return
+        try:
+            sw = int(win.evaluate_js("screen.width") or 1920)
+            win.move(max(20, sw - 320), 20)
+        except Exception:
+            pass
+
+    def position_panel(self):
+        """按当前形态定位输出面板（逻辑像素，pywebview 处理 DPI）。
+        lyrics=宽扁横条贴屏幕底部 / normal=屏幕正中央"""
+        win = self.get_win("panel")
+        if not win:
+            return
+        try:
+            sw = int(win.evaluate_js("screen.width") or 1920)
+            sh = int(win.evaluate_js("screen.height") or 1080)
+        except Exception:
+            sw, sh = 1920, 1080
+        if self.panel_shape == "lyrics":
+            w = min(PANEL_LYRICS_MAX_W, int(sw * 0.85))
+            h = PANEL_LYRICS_H
+            win.resize(w, h)
+            win.move((sw - w) // 2, max(20, sh - h - 60))
+        else:
+            w, h = PANEL_NORMAL_SIZE
+            win.resize(w, h)
+            win.move((sw - w) // 2, max(20, (sh - h) // 2))
+
+    def set_panel_shape(self, shape):
+        """歌词 tab 驱动的形态切换：lyrics（宽扁横条）/ normal（常规面板）"""
+        if shape == self.panel_shape:
+            return
+        self.panel_shape = shape
+        self.position_panel()
+        logging.info("输出面板形态: %s", shape)
+
+    # ---------- 截图排除 ----------
+
+    def own_window_rects(self):
+        """本工具自身不透明窗口的屏幕物理矩形列表（截图涂黑排除用）。
+        含 tk overlay（跳过全屏透明画布）+ 两个 webview 窗口（可见时）。"""
+        user32 = ctypes.windll.user32
+        sw, sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+        rects = []
+        # tk 侧窗口
+        for wid in set(self._tk_ids() or []):
+            try:
+                hwnd = user32.GetAncestor(wid, 2) or wid
+                if not hwnd or not user32.IsWindowVisible(hwnd):
+                    continue
+                rect = wintypes.RECT()
+                if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    continue
+                rw, rh = rect.right - rect.left, rect.bottom - rect.top
+                if rw <= 0 or rh <= 0 or (rw >= sw and rh >= sh):
+                    continue  # inplace 全屏透明画布跳过
+                rects.append((rect.left, rect.top, rw, rh))
+            except Exception:
+                pass
+        # webview 窗口
+        for hwnd in (self.main_hwnd, self.panel_hwnd):
+            if not hwnd or not user32.IsWindowVisible(hwnd):
+                continue
+            try:
+                rect = wintypes.RECT()
+                if user32.GetWindowRect(hwnd, ctypes.byref(rect)) and rect.right > rect.left:
+                    rects.append((rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
+            except Exception:
+                pass
+        return rects
+
+    def exclude_hwnds(self):
+        """F7 前台排除集合（本工具窗口不该被当成游戏捕获）：tk 侧 + webview 侧"""
+        user32 = ctypes.windll.user32
+        result = set()
+        for wid in set(self._tk_ids() or []):
+            try:
+                result.add(user32.GetAncestor(user32.GetParent(wid), 2))
+                result.add(user32.GetAncestor(wid, 2))
+            except Exception:
+                pass
+        for hwnd in (self.main_hwnd, self.panel_hwnd):
+            if hwnd:
+                result.add(hwnd)
+        return result
+
+    def visible_hwnds(self):
+        """当前可见的 webview 窗口句柄（F5 截图前临时隐藏用）"""
+        user32 = ctypes.windll.user32
+        return [h for h in (self.main_hwnd, self.panel_hwnd)
+                if h and user32.IsWindowVisible(h)]
