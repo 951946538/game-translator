@@ -122,7 +122,21 @@
 
   /* 右列 */
   .right { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-  .ask-bar { display: flex; gap: 8px; }
+  /* 提问区：默认收起成细条，悬停/输入时展开 */
+  .ask-bar {
+    display: flex; gap: 8px;
+    max-height: 0; opacity: 0; overflow: hidden;
+    transition: max-height .25s ease, opacity .2s ease;
+  }
+  .ask-wrap:hover .ask-bar, .ask-bar:focus-within { max-height: 48px; opacity: 1; }
+  .ask-trigger {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    height: 26px; border-radius: 8px; cursor: pointer;
+    background: rgba(49,50,68,.45); color: var(--text-dim);
+    font-size: 11.5px; transition: all .2s;
+  }
+  .ask-trigger:hover { color: var(--accent); background: rgba(49,50,68,.8); }
+  .ask-wrap:hover .ask-trigger, .ask-bar:focus-within ~ .ask-trigger { display: none; }
   .ask-bar input {
     flex: 1; background: var(--input); border: 1px solid transparent;
     border-radius: 10px; padding: 0 14px; height: 42px;
@@ -268,10 +282,13 @@
   </div>
 
   <div class="right">
-    <div class="ask-bar">
-      <input id="askInput" placeholder="问 AI：游戏的任何问题（攻略/名词/画面内容…）" />
-      <label class="chk"><input type="checkbox" id="withImage">带画面</label>
-      <button class="ask-btn" onclick="askAI()">提问</button>
+    <div class="ask-wrap">
+      <div class="ask-bar" id="askBar">
+        <input id="askInput" placeholder="问 AI：游戏的任何问题（攻略/名词/画面内容…）" />
+        <label class="chk"><input type="checkbox" id="withImage">带画面</label>
+        <button class="ask-btn" onclick="askAI()">提问</button>
+      </div>
+      <div class="ask-trigger" onclick="focusAsk()">💬 问 AI · 悬停展开</div>
     </div>
     <div class="history-head">输出历史 · F5 截图直译 / 翻译 / 提问回答</div>
     <div class="history" id="history">
@@ -352,6 +369,10 @@
   document.getElementById("askInput").addEventListener("keydown", e => {
     if (e.key === "Enter") askAI();
   });
+  function focusAsk() {
+    // 点击触发条：此时已处于 hover 展开状态，直接聚焦输入框
+    setTimeout(() => document.getElementById("askInput").focus(), 60);
+  }
 
   // ---------- 状态 ----------
   function setStage(text, tone) {
