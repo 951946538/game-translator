@@ -176,3 +176,8 @@ class PyApi:
         """输出面板透明度：悬停时前端调 1.0（不透明），移开恢复 0.85"""
         self._app_provider()._set_output_alpha(float(alpha))
         return True
+
+    def set_main_alpha(self, alpha):
+        """主控窗透明度：悬停 1.0，移开 0.92"""
+        self._app_provider()._set_main_alpha(float(alpha))
+        return True

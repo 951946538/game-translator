@@ -282,6 +282,13 @@
     if (Date.now() - BOOT_TIME < 2000) return;
     pywebview.api.close_window();
   }
+  // 半透明窗口：悬停恢复不透明（操作按钮时永远清晰），移开恢复半透明
+  document.addEventListener("mouseenter", () => {
+    if (window.pywebview && pywebview.api) pywebview.api.set_main_alpha(1.0);
+  });
+  document.addEventListener("mouseleave", () => {
+    if (window.pywebview && pywebview.api) pywebview.api.set_main_alpha(0.92);
+  });
   window.addEventListener("pywebviewready", () => {
     pywebview.api.get_state().then(s => {
       applyState(s);

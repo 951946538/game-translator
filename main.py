@@ -50,7 +50,7 @@ from app.config import Config
 from app.capture import RegionMonitor
 from app.ocr_engine import OCREngine
 from app.translator import Translator
-from app.overlay import OverlayWindow
+from app.overlay import OverlayWindow, LyricsBar
 from app.region_select import select_region
 from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F11, VK_LWIN, VK_RWIN
 from app.textblock import group_lines
@@ -428,7 +428,15 @@ class App:
                         })
                         threading.Timer(2.0, lambda: self._bridge.push(
                             "stage", {"text": self._monitor_status_text(), "tone": "info"})).start()
-                        self.ui_queue.put(("positioned", list(self._positioned_history)))
+                        if self.overlay_mode == "lyrics":
+                            # 歌词模式：取面积最大的块（对话主文本）显示到底部字幕条
+                            main_block = max(
+                                positioned,
+                                key=lambda p: (p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]),
+                            )
+                            self.ui_queue.put(("lyrics", main_block["text"]))
+                        else:
+                            self.ui_queue.put(("positioned", list(self._positioned_history)))
                         # 翻译历史：原文/译文对照推给 Web UI（文本游戏回看）
                         self._bridge.push("translation", {
                             "original": "\n".join(lines),
@@ -452,6 +460,8 @@ class App:
                 kind = item[0]
                 if kind == "positioned":
                     self.overlay.update_positioned(item[1])
+                elif kind == "lyrics":
+                    self.overlay.update_lyrics(item[1])
                 elif kind == "translation":
                     _, original, translated = item
                     self.overlay.update_translation(translated, self.translator.backend, self.paused)
@@ -624,8 +634,9 @@ class App:
         self._positioned_history = []  # 换了监控区域，清空旧译文
         self._set_stage("⏸ 自动翻译已关闭\nF6/F5 手动 · F9 恢复自动")
         self.start_monitor()
-        if self.overlay_mode != "inplace":
-            self._do_toggle_overlay_mode()
+        if self.overlay_mode == "panel":
+            # 独立面板不适合覆盖场景，切到覆盖模式；歌词模式与游戏窗口捕获兼容，保持
+            self._do_toggle_overlay_mode(target="inplace")
         else:
             self.overlay.update_status(self.translator.backend, self.paused)
         self._push_state()
@@ -679,24 +690,31 @@ class App:
         self.overlay.update_status(self.translator.backend, self.paused)
         self._push_state()
 
-    # ---------- 悬浮窗模式切换（F11） ----------
+    # ---------- 悬浮窗模式切换（F11）：inplace 覆盖原文 → panel 独立面板 → lyrics 桌面歌词 ----------
+
+    _MODE_CYCLE = {"inplace": "panel", "panel": "lyrics", "lyrics": "inplace"}
+    _MODE_LABEL = {"inplace": "覆盖原文", "panel": "独立面板", "lyrics": "桌面歌词"}
 
     def toggle_overlay_mode(self):
         self.root.after(0, self._do_toggle_overlay_mode)
 
-    def _do_toggle_overlay_mode(self):
-        self.overlay_mode = "panel" if self.overlay_mode == "inplace" else "inplace"
+    def _do_toggle_overlay_mode(self, target=None):
+        self.overlay_mode = target or self._MODE_CYCLE[self.overlay_mode]
         self.config.set(self.overlay_mode, "overlay_mode")
         self.config.save()
         try:
             self.overlay.win.destroy()
         except Exception:
             pass
-        self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
+        if self.overlay_mode == "lyrics":
+            self.overlay = LyricsBar(self.root, self.config)
+        else:
+            self.overlay = OverlayWindow(self.root, self.config, mode=self.overlay_mode)
         App.window_ids.append(self.overlay.win.winfo_id())
         self.overlay.update_status(self.translator.backend, self.paused)
         self._last_positioned_key = None  # 切换后强制重新翻译一次
         self._positioned_history = []
+        self._set_stage(f"显示: {self._MODE_LABEL[self.overlay_mode]}", "success")
         self._push_state()
 
     # ---------- 输出面板窗口（第二窗口，固定尺寸，显示/隐藏切换） ----------
@@ -733,12 +751,24 @@ class App:
     def _set_output_alpha(self, alpha=0.85):
         """输出面板整体半透明（Win32 LWA_ALPHA）；alpha=1.0 恢复不透明。
         pywebview 无透明度 API，直接对窗口句柄设置分层属性。"""
+        self._apply_window_alpha("输出面板", alpha, cache_attr="_panel_hwnd")
+
+    def _set_main_alpha(self, alpha=0.92):
+        """主控窗透明度（悬停恢复不透明，移开恢复半透明）"""
+        if self._webview_hwnd:
+            self._apply_window_alpha(None, alpha, hwnd=self._webview_hwnd)
+
+    def _apply_window_alpha(self, title, alpha, cache_attr=None, hwnd=None):
+        """对 pywebview 窗口应用整体透明度（Win32 分层窗口）"""
         import ctypes
         try:
-            hwnd = getattr(self, "_panel_hwnd", None) or _find_webview_hwnd("输出面板")
-            if not hwnd:
-                return
-            self._panel_hwnd = hwnd
+            if hwnd is None:
+                hwnd = (getattr(self, cache_attr, None) if cache_attr else None) \
+                    or (title and _find_webview_hwnd(title))
+                if not hwnd:
+                    return
+                if cache_attr:
+                    setattr(self, cache_attr, hwnd)
             user32 = ctypes.windll.user32
             GWL_EXSTYLE, WS_EX_LAYERED, LWA_ALPHA = -20, 0x00080000, 0x00000002
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
@@ -746,7 +776,7 @@ class App:
                 user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
             user32.SetLayeredWindowAttributes(hwnd, 0, max(1, int(alpha * 255)), LWA_ALPHA)
         except Exception:
-            logging.error("设置面板透明度失败:\n%s", traceback.format_exc())
+            logging.error("设置窗口透明度失败:\n%s", traceback.format_exc())
 
     def _keep_on_top_loop(self):
         """每 5 秒用 Win32 直设置顶（HWND_TOPMOST）。不用 pywebview 的 on_top：
@@ -862,10 +892,10 @@ def main():
     ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
     api = PyApi(lambda: holder["app"], wins=wins)
 
-    # 主控制窗（固定尺寸 348x620，无边框，永不做 resize）
+    # 主控制窗（固定尺寸 300x520，无边框，永不做 resize；显示时定位右上角+半透明）
     win_main = webview.create_window(
         "游戏实时翻译", os.path.join(ui_dir, "index.html"), js_api=api,
-        x=80, y=100, width=348, height=620, frameless=True, on_top=True,
+        width=300, height=520, frameless=True, on_top=True,
         background_color="#14141f",
     )
     # 输出面板窗（固定尺寸 860x640，隐藏启动，Vue 双 tab）
@@ -882,6 +912,14 @@ def main():
     def _on_main_shown():
         hwnd = _find_webview_hwnd()
         app._webview_hwnd = hwnd or 0
+        # 定位屏幕右上角（逻辑像素）+ 半透明
+        try:
+            sw = int(win_main.evaluate_js("screen.width") or 1920)
+            win_main.move(max(20, sw - 320), 20)
+        except Exception:
+            pass
+        if hwnd:
+            app._apply_window_alpha(None, 0.92, hwnd=hwnd)
         logging.info("主控制窗句柄: %s", hwnd or "未找到！")
 
     win_main.events.shown += _on_main_shown
