@@ -108,10 +108,14 @@ def _thumb_b64(frame, width=520, quality=80):
 class App:
     window_ids = []  # 本工具所有窗口的 winfo_id（用于 F7 排除自身窗口）
 
-    def __init__(self, bridge: EventBridge):
+    def __init__(self, bridge: EventBridge, win_provider=None):
         App.window_ids = []
         self._bridge = bridge
         self._status_text = ""
+        self._win_provider = win_provider  # () -> pywebview 窗口（贴边收缩用）
+        self._webview_hwnd = 0
+        self._docked = None               # 当前贴边侧（None/“left”/“right”）
+        self._saved_win_rect = None       # 收缩前窗口位置尺寸（展开恢复用）
         self.config = Config()
         self.translator = Translator(self.config)
 
@@ -660,6 +664,54 @@ class App:
         self._positioned_history = []
         self._push_state()
 
+    # ---------- 贴边收缩（无边框主窗口） ----------
+
+    def _check_edge_dock(self):
+        """拖动结束后：窗口贴近屏幕左右边缘（≤40px）则收缩成竖条停靠"""
+        import ctypes
+        import ctypes.wintypes
+        if not self._webview_hwnd or not self._win_provider:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            rect = ctypes.wintypes.RECT()
+            if not user32.GetWindowRect(self._webview_hwnd, ctypes.byref(rect)):
+                return
+            sw = user32.GetSystemMetrics(0)
+            left_gap, right_gap = rect.left, sw - rect.right
+            if left_gap <= 40 or right_gap <= 40:
+                side = "left" if left_gap <= right_gap else "right"
+                self._dock(side, rect, sw)
+        except Exception:
+            logging.error("贴边检测失败:\n%s", traceback.format_exc())
+
+    def _dock(self, side, rect, screen_w):
+        win = self._win_provider()
+        if not win:
+            return
+        self._saved_win_rect = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+        dock_w, dock_h = 46, 260
+        y = max(0, (rect.top + rect.bottom) // 2 - dock_h // 2)
+        win.resize(dock_w, dock_h)
+        if side == "left":
+            win.move(0, y)
+        else:
+            win.move(screen_w - dock_w, y)
+        self._docked = side
+        self._bridge.push("docked", {"side": side})
+        logging.info("窗口已贴边收缩（%s）", side)
+
+    def _expand_window(self):
+        if not self._docked or not self._win_provider:
+            return
+        win = self._win_provider()
+        x, y, w, h = self._saved_win_rect or (200, 200, 1180, 620)
+        win.resize(w, h)
+        win.move(x, y)
+        self._docked = None
+        self._bridge.push("docked", {"side": None})
+        logging.info("窗口已展开")
+
     # ---------- 生命周期 ----------
 
     def on_close(self):
@@ -732,7 +784,7 @@ def main():
 
     def tk_main():
         # tkinter 在子线程内创建并 mainloop（覆盖层载体）
-        app = App(bridge)
+        app = App(bridge, win_provider=lambda: holder.get("win"))
         holder["app"] = app
         ready.set()
         try:
@@ -746,13 +798,17 @@ def main():
     if app is None:
         raise RuntimeError("tk 侧初始化失败")
 
-    api = PyApi(lambda: holder["app"])
+    win_holder = {"win": None}
+    api = PyApi(lambda: holder["app"], win_provider=lambda: win_holder["win"])
     ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
     win = webview.create_window(
         "游戏实时翻译", ui_path, js_api=api,
         width=1180, height=620, min_size=(860, 480),
+        frameless=True,  # 无边框：标题栏由 HTML 自绘（可拖动 + 贴边收缩）
+        easy_drag=False,
         background_color="#14141f",
     )
+    win_holder["win"] = win
     win.events.closed += app.on_close
     win.events.shown += lambda: setattr(app, "_webview_hwnd", _find_webview_hwnd() or 0)
     bridge.attach(win)

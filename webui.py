@@ -46,8 +46,9 @@ class PyApi:
     """暴露给前端 JS 的接口（pywebview js_api）。
     所有方法可能从 webview 主线程调用，App 侧方法需线程安全（现状即如此：热键线程也直接调用）。"""
 
-    def __init__(self, app_provider):
+    def __init__(self, app_provider, win_provider=None):
         self._app_provider = app_provider  # () -> App 实例
+        self._win_provider = win_provider  # () -> pywebview 窗口
 
     def get_state(self):
         """前端初始化时拉取完整状态"""
@@ -104,4 +105,32 @@ class PyApi:
     def open_url(self, url):
         import webbrowser
         webbrowser.open(url)
+        return True
+
+    # ---------- 无边框窗口控制（贴边收缩） ----------
+
+    def close_window(self):
+        self._win_provider().destroy()
+        return True
+
+    def minimize_window(self):
+        self._win_provider().minimize()
+        return True
+
+    def drag_window(self):
+        """拖动标题栏：向窗口发送 HTCAPTION 按下消息让系统接管拖动（阻塞至松手），
+        松手后检查是否贴靠屏幕边缘（贴边则收缩成竖条）"""
+        app = self._app_provider()
+        hwnd = getattr(app, "_webview_hwnd", 0)
+        if hwnd:
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.ReleaseCapture()
+            WM_NCLBUTTONDOWN, HTCAPTION = 0xA1, 2
+            user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+        app._check_edge_dock()
+        return True
+
+    def expand_window(self):
+        self._app_provider()._expand_window()
         return True

@@ -48,6 +48,7 @@
   header h1 { font-size: 15px; font-weight: 600; letter-spacing: .5px; }
   header .ver { font-size: 10px; color: var(--text-dim); margin-left: 2px; }
   .spacer { flex: 1; }
+  header { -webkit-app-region: no-drag; user-select: none; cursor: default; }
   .badge {
     font-size: 11px; padding: 4px 12px; border-radius: 999px;
     background: var(--input); color: var(--text-dim);
@@ -65,6 +66,20 @@
     font-size: 14px; transition: background .15s;
   }
   .icon-btn:hover { background: var(--input-hover); }
+  .icon-btn.close:hover { background: #e5484d; color: #fff; }
+
+  /* ===== 贴边收缩态 ===== */
+  body.docked main, body.docked header > *:not(#dockTab) { display: none; }
+  body.docked { background: linear-gradient(180deg, #7c3aed, #2563eb); }
+  #dockTab {
+    display: none; position: fixed; inset: 0;
+    align-items: center; justify-content: center;
+    writing-mode: vertical-rl; letter-spacing: 6px;
+    color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+    text-shadow: 0 0 10px rgba(0,0,0,.35);
+  }
+  body.docked #dockTab { display: flex; }
+  body.docked #dockTab:hover { filter: brightness(1.2); }
 
   /* ===== 主区 ===== */
   main { flex: 1; display: flex; gap: 14px; padding: 0 18px 16px; min-height: 0; }
@@ -222,14 +237,18 @@
 </head>
 <body>
 
-<header>
+<header id="titlebar">
   <div class="logo">译</div>
   <h1>游戏实时翻译 <span class="ver">v0.4</span></h1>
   <div class="spacer"></div>
   <div class="badge" id="badge"><span class="dot"></span><span id="badgeText">未监控</span></div>
   <button class="icon-btn" title="API 设置" onclick="openSettings()">🔑</button>
   <button class="icon-btn" title="使用说明" onclick="openHelp()">?</button>
+  <button class="icon-btn" title="最小化" onclick="winMin()">—</button>
+  <button class="icon-btn close" title="关闭" onclick="winClose()">✕</button>
 </header>
+
+<div id="dockTab" onclick="pywebview.api.expand_window()">游戏实时翻译 ▸</div>
 
 <main>
   <div class="left">
@@ -309,8 +328,21 @@
       else if (kind === "vision_delta") appendDelta(data);
       else if (kind === "vision_done") finishCard();
       else if (kind === "translation") addCard("翻译", null, null, data.original, data.translated);
+      else if (kind === "docked") {
+        document.body.classList.toggle("docked", !!data.side);
+        const tab = document.getElementById("dockTab");
+        tab.textContent = data.side === "left" ? "游戏实时翻译 ▸" : "◂ 游戏实时翻译";
+      }
     }
   };
+
+  // 无边框标题栏：拖动（按钮和徽章区域除外）
+  document.getElementById("titlebar").addEventListener("mousedown", e => {
+    if (e.target.closest("button")) return;
+    pywebview.api.drag_window();
+  });
+  function winMin() { pywebview.api.minimize_window(); }
+  function winClose() { pywebview.api.close_window(); }
 
   // ---------- JS → Python ----------
   function py(name) { pywebview.api.action(name); }
