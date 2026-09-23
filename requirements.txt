@@ -7,3 +7,4 @@ Pillow
 requests
 keyring>=24.0        # API 密钥存 Windows 凭据管理器（分发场景各自填写）
 pywebview>=5.0       # Web UI 容器（WebView2）
+dxcam>=0.0.5         # DXGI 桌面复制抓屏（独占全屏游戏/HDR 下 GDI 截屏会黑图）

@@ -109,16 +109,13 @@ def _thumb_b64(frame, width=520, quality=80):
 class App:
     window_ids = []  # 本工具所有窗口的 winfo_id（用于 F7 排除自身窗口）
 
-    def __init__(self, bridge: EventBridge, win_provider=None):
+    def __init__(self, bridge: EventBridge, wins_provider=None):
         App.window_ids = []
         self._bridge = bridge
         self._status_text = ""
-        self._win_provider = win_provider  # () -> pywebview 窗口（贴边收缩用）
-        self._webview_hwnd = 0
-        self._docked = None               # 当前贴边侧（None/“left”/“right”）
-        self._saved_win_rect = None       # 收缩前窗口位置尺寸（展开恢复用）
-        self._panel_expanded = False      # 主面板右侧区域展开态（默认收起，悬停展开）
-        self._ui_scale = 1.0              # WebView DPI 缩放（devicePixelRatio，shown 后更新）
+        self._wins_provider = wins_provider or (lambda: {})  # () -> {name: pywebview window}
+        self._webview_hwnd = 0            # 主控制窗句柄（截图涂黑排除/F7 排除用）
+        self._output_open = False         # 输出面板窗口显示态
         self.config = Config()
         self.translator = Translator(self.config)
 
@@ -180,8 +177,6 @@ class App:
         threading.Thread(target=self._ocr_worker, daemon=True).start()
         threading.Thread(target=self._translate_worker, daemon=True).start()
         threading.Thread(target=self._preload_ocr, daemon=True).start()
-        # 贴边收缩监视：轮询主窗口位置（不依赖拖动回调，任何方式贴边都能触发）
-        threading.Thread(target=self._edge_watch_loop, daemon=True).start()
         # 主面板置顶保持
         threading.Thread(target=self._keep_on_top_loop, daemon=True).start()
         self.root.after(100, self._poll_ui_queue)
@@ -671,124 +666,39 @@ class App:
         self._positioned_history = []
         self._push_state()
 
-    # ---------- 贴边收缩（无边框主窗口） ----------
+    # ---------- 输出面板窗口（第二窗口，固定尺寸，显示/隐藏切换） ----------
 
-    def _edge_watch_loop(self):
-        """每 0.5s 检查主窗口是否贴靠屏幕左右边缘（≤40 逻辑像素）→ 收缩成竖条。
-        轮询方式：不依赖拖动回调（easy_drag 的结束时机拿不到），任何方式贴边都生效。"""
-        import ctypes
-        import ctypes.wintypes
-        while True:
-            time.sleep(0.5)
-            try:
-                if self._docked or not self._win_provider:
-                    continue
-                if time.time() < getattr(self, "_dock_exempt_until", 0):
-                    continue  # 刚展开的豁免期，避免恢复位置在边缘被立即收回
-                hwnd = self._webview_hwnd
-                if not hwnd:
-                    continue
-                scale = getattr(self, "_ui_scale", 1.0) or 1.0
-                user32 = ctypes.windll.user32
-                rect = ctypes.wintypes.RECT()
-                if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    continue
-                sw = user32.GetSystemMetrics(0)
-                win_w = rect.right - rect.left
-                if win_w < int(100 * scale):
-                    continue  # 已是收缩态（外部改变尺寸的场景）
-                if win_w > int(400 * scale):
-                    continue  # 宽态（右侧区域展开）不参与贴边收缩，避免与面板展开互相打架
-                threshold = int(40 * scale)
-                left_gap, right_gap = rect.left, sw - rect.right
-                if left_gap <= threshold or right_gap <= threshold:
-                    side = "left" if left_gap <= right_gap else "right"
-                    self._dock(side, rect, sw)
-            except Exception:
-                pass
-
-    def _set_window_pos(self, x, y, w, h):
-        """Win32 原子设置主窗口位置与尺寸（物理像素）"""
-        import ctypes
-        import ctypes.wintypes
-        hwnd = self._webview_hwnd
-        if not hwnd:
-            return False
-        user32 = ctypes.windll.user32
-        SWP_NOZORDER = 0x0004
-        user32.SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER)
-        return True
-
-    def _dock(self, side, rect, screen_w):
-        scale = getattr(self, "_ui_scale", 1.0) or 1.0
-        self._saved_win_rect = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
-        dock_w, dock_h = int(46 * scale), int(260 * scale)
-        y = max(0, (rect.top + rect.bottom) // 2 - dock_h // 2)
-        if not self._set_window_pos(0 if side == "left" else screen_w - dock_w, y, dock_w, dock_h):
+    def _toggle_output_window(self, force_hide=False):
+        """显示/隐藏输出面板窗口。窗口常驻（隐藏保活），Vue 状态与历史记录不丢失。"""
+        wins = self._wins_provider()
+        if not wins:
             return
-        self._docked = side
-        self._bridge.push("docked", {"side": side})
-        logging.info("窗口已贴边收缩（%s）", side)
-
-    def _expand_window(self):
-        if not self._docked:
-            return
-        import ctypes
-        user32 = ctypes.windll.user32
-        sw = user32.GetSystemMetrics(0)
-        scale = getattr(self, "_ui_scale", 1.0) or 1.0
-        margin = int(60 * scale)
-        x, y, w, h = self._saved_win_rect or (200, 200, int(348 * scale), int(620 * scale))
-        # 恢复位置若仍在边缘附近，往屏幕内侧偏移（否则轮询会立即又收缩）
-        if x < margin:
-            x = margin
-        if x + w > sw - margin:
-            x = max(margin, sw - margin - w)
-        if not self._set_window_pos(x, y, w, h):
-            return
-        self._docked = None
-        self._dock_exempt_until = time.time() + 3  # 豁免 3 秒
-        self._bridge.push("docked", {"side": None})
-        logging.info("窗口已展开")
-
-    # ---------- 主面板宽窄切换（右侧区域 hover 展开） ----------
-
-    PANEL_WIDE_W = 1180    # 展开态宽（逻辑像素，与 CSS 布局一致）
-    PANEL_COMPACT_W = 348  # 收起态宽（逻辑像素：仅左列 + 右缘触发竖条）
-
-    def _expand_panel(self, expanded):
-        """切换主面板宽窄：Win32 SetWindowPos 一次原子设置位置+尺寸。
-        尺寸按逻辑像素定义，设置时乘 DPI 缩放（devicePixelRatio）转物理像素。"""
-        if expanded == getattr(self, "_panel_expanded", None):
+        win = wins.get("panel")
+        if not win:
             return
         try:
-            import ctypes
-            import ctypes.wintypes
-            hwnd = self._webview_hwnd
-            if not hwnd:
-                return
-            user32 = ctypes.windll.user32
-            rect = ctypes.wintypes.RECT()
-            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                return
-            scale = getattr(self, "_ui_scale", 1.0) or 1.0
-            x, y, h = rect.left, rect.top, rect.bottom - rect.top
-            w = int((self.PANEL_WIDE_W if expanded else self.PANEL_COMPACT_W) * scale)
-            SWP_NOZORDER = 0x0004
-            user32.SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER)
-            self._panel_expanded = expanded
-            logging.info("主面板%s（%dx%d@%d,%d, scale=%.2f）", "展开" if expanded else "收起", w, h, x, y, scale)
+            if force_hide or getattr(self, "_output_open", False):
+                win.hide()
+                self._output_open = False
+            else:
+                win.show()
+                self._output_open = True
+            logging.info("输出面板%s", "显示" if self._output_open else "隐藏")
+            self._bridge.push("output_state", {"open": self._output_open}, target="main")
         except Exception:
-            logging.error("面板宽窄切换失败:\n%s", traceback.format_exc())
+            logging.error("输出面板切换失败:\n%s", traceback.format_exc())
 
     def _keep_on_top_loop(self):
-        """每 5 秒重申 webview 主面板置顶（全屏游戏等会抢走置顶属性）"""
+        """每 5 秒重申两个 webview 窗口置顶（全屏游戏等会抢走置顶属性）。
+        注意：pywebview 的 on_top 是 property，必须赋值（win.on_top = True），
+        函数式调用 win.on_top(True) 实际是取值后当函数调，会静默失败。"""
         while True:
             time.sleep(5)
             try:
-                win = self._win_provider()
-                if win:
-                    win.on_top(True)
+                wins = self._wins_provider() or {}
+                for win in wins.values():
+                    if win:
+                        win.on_top = True
             except Exception:
                 pass
 
@@ -860,12 +770,12 @@ def main():
 
     bridge = EventBridge()
     holder = {}
-    win_holder = {"win": None}
+    wins = {}  # name -> pywebview window
     ready = threading.Event()
 
     def tk_main():
         # tkinter 在子线程内创建并 mainloop（覆盖层载体）
-        app = App(bridge, win_provider=lambda: win_holder["win"])
+        app = App(bridge, wins_provider=lambda: wins)
         holder["app"] = app
         ready.set()
         try:
@@ -879,31 +789,35 @@ def main():
     if app is None:
         raise RuntimeError("tk 侧初始化失败")
 
-    api = PyApi(lambda: holder["app"], win_provider=lambda: win_holder["win"])
-    ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
-    win = webview.create_window(
-        "游戏实时翻译", ui_path, js_api=api,
-        width=App.PANEL_COMPACT_W, height=620,  # 默认收起态（右侧区域悬停展开）
-        min_size=(330, 420),
-        frameless=True,  # 无边框：标题栏由 HTML 自绘；拖动用 pywebview 自带 easy_drag
+    ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
+    api = PyApi(lambda: holder["app"], wins=wins)
+
+    # 主控制窗（固定尺寸 348x620，无边框，永不做 resize）
+    win_main = webview.create_window(
+        "游戏实时翻译", os.path.join(ui_dir, "index.html"), js_api=api,
+        x=80, y=100, width=348, height=620, frameless=True,
         background_color="#14141f",
     )
-    win_holder["win"] = win
-    win.events.closed += app.on_close
+    # 输出面板窗（固定尺寸 860x640，隐藏启动，Vue 双 tab）
+    win_panel = webview.create_window(
+        "输出面板", os.path.join(ui_dir, "panel.html"), js_api=api,
+        x=444, y=100, width=860, height=640, frameless=True, hidden=True,
+        background_color="#14141f",
+    )
+    wins["main"] = win_main
+    wins["panel"] = win_panel
 
-    def _on_shown():
+    win_main.events.closed += app.on_close
+
+    def _on_main_shown():
         hwnd = _find_webview_hwnd()
         app._webview_hwnd = hwnd or 0
-        try:
-            # WebView 的 DPI 缩放（面板尺寸换算：逻辑像素 × scale = 物理像素）
-            app._ui_scale = float(win.evaluate_js("window.devicePixelRatio") or 1.0)
-        except Exception:
-            app._ui_scale = 1.0
-        logging.info("webview 窗口句柄: %s, DPI 缩放: %.2f", hwnd or "未找到！", app._ui_scale)
+        logging.info("主控制窗句柄: %s", hwnd or "未找到！")
 
-    win.events.shown += _on_shown
-    bridge.attach(win)
-    webview.start()  # 主线程消息循环（阻塞至窗口关闭）
+    win_main.events.shown += _on_main_shown
+    bridge.attach("main", win_main)
+    bridge.attach("panel", win_panel)
+    webview.start()  # 主线程消息循环（阻塞至主窗口关闭）
 
     # webview 关闭后让 tk 侧退出
     app.ui_queue.put(("shutdown",))

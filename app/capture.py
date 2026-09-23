@@ -10,6 +10,34 @@ import numpy as np
 
 _MSS = getattr(mss, "MSS", mss.mss)  # 兼容 mss 9.x(mss) / 10.x(MSS)
 
+# ---------- DXGI 桌面复制引擎（dxcam）：独占全屏游戏 / HDR 下 GDI 截屏会得到黑图，
+# DXGI Desktop Duplication 是游戏录制工具的标准方案，两种场景都能抓 ----------
+_dxcam = None
+_dxcam_failed = False
+
+
+def _dxcam_grab(region):
+    """DXGI 抓屏，失败或不可用返回 None（调用方回退 mss）。region 为 mss 字典格式。"""
+    global _dxcam, _dxcam_failed
+    if _dxcam_failed:
+        return None
+    try:
+        if _dxcam is None:
+            import dxcam
+            _dxcam = dxcam.create(output_color="BGR")
+            if _dxcam is None:
+                _dxcam_failed = True
+                return None
+        left, top = region["left"], region["top"]
+        frame = _dxcam.grab(region=(left, top, left + region["width"], top + region["height"]))
+        if frame is None:
+            return None
+        return frame[:, :, ::-1]  # BGR → RGB
+    except Exception:
+        _dxcam_failed = True
+        logging.warning("dxcam 不可用，后续使用 mss 抓屏:\n%s", traceback.format_exc())
+        return None
+
 
 class _BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [
@@ -308,14 +336,22 @@ class RegionMonitor:
             logging.error("窗口抓取异常，回退屏幕截图:\n%s", traceback.format_exc())
             return None
 
+    def _screen_grab_raw(self):
+        """屏幕抓帧（未涂黑）：dxcam(DXGI) 优先——独占全屏游戏/HDR 下 GDI 截屏
+        会得到黑图，DXGI 桌面复制两种场景都能抓；黑图/失败自动回退 mss"""
+        frame = _dxcam_grab(self.region)
+        if frame is not None and frame.std() >= 1.0:
+            return frame
+        with _MSS() as sct:
+            shot = sct.grab(self.region)
+        return np.asarray(shot)[:, :, :3]
+
     def raw_grab(self):
         """常规截帧（帧差检测用）：优先游戏窗口直接抓取，否则截屏并涂黑自身窗口区域"""
         frame = self._grab_window()
         if frame is not None:
             return frame
-        with _MSS() as sct:
-            shot = sct.grab(self.region)
-        frame = np.asarray(shot)[:, :, :3]
+        frame = self._screen_grab_raw()
         self._mask_own_windows(frame)
         return frame
 
@@ -325,9 +361,7 @@ class RegionMonitor:
         frame = self._grab_window()
         if frame is not None:
             return frame
-        with _MSS() as sct:
-            shot = sct.grab(self.region)
-        frame = np.asarray(shot)[:, :, :3]
+        frame = self._screen_grab_raw()
         self._mask_own_windows(frame)
         return frame
 

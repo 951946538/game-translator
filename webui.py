@@ -1,4 +1,4 @@
-"""Web UI 桥接层：PyApi 暴露给前端调用（JS → Python），EventBridge 推送事件（Python → JS）"""
+"""Web UI 桥接层：PyApi 暴露给前端调用（JS → Python），EventBridge 向多窗口推送事件（Python → JS）"""
 import json
 import queue
 import threading
@@ -6,22 +6,34 @@ import time
 
 
 class EventBridge:
-    """Python → JS 事件推送：批量合并高频事件（流式 delta），evaluate_js 注入前端"""
+    """Python → JS 事件推送：按路由表分发到各窗口，批量合并高频增量（流式 delta）"""
+
+    # 事件路由表：主控窗(main) / 输出窗(panel)
+    ROUTE = {
+        "vision_delta": ("panel",),           # 流式增量只发输出窗（主窗不需要高频事件）
+        "vision_done": ("panel",),
+        "stage": ("main",),                   # 状态卡在主窗
+        "state": ("main",),
+        "output_state": ("main",),
+        # 其余事件（vision_start / ask_start / translation 等）默认发两窗：
+        # 主窗亮红点，输出窗渲染内容
+    }
 
     def __init__(self):
         self._q = queue.Queue()
-        self._win = None
+        self._targets = {}  # name -> pywebview window
         self._thread = None
 
-    def attach(self, win):
-        """webview 窗口创建后绑定，并启动推送线程"""
-        self._win = win
+    def attach(self, name, win):
+        """注册窗口（main=主控制窗 / panel=输出窗）"""
+        self._targets[name] = win
         if self._thread is None:
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
 
-    def push(self, kind, data=None):
-        self._q.put((kind, data))
+    def push(self, kind, data=None, target=None):
+        """target 显式指定时优先；否则查路由表；无表项默认发全部窗口"""
+        self._q.put((kind, data, target))
 
     def _loop(self):
         while True:
@@ -33,22 +45,30 @@ class EventBridge:
                     batch.append(self._q.get(timeout=max(0.0, deadline - time.time())))
                 except queue.Empty:
                     break
-            if self._win is None:
-                continue
-            try:
-                payload = json.dumps(batch, ensure_ascii=False)
-                self._win.evaluate_js(f"window.__pyEvents({payload})")
-            except Exception:
-                pass  # 窗口已关闭等场景
+            by_target = {"main": [], "panel": []}
+            for kind, data, target in batch:
+                names = target or self.ROUTE.get(kind, ("main", "panel"))
+                for n in names:
+                    if n in by_target:
+                        by_target[n].append([kind, data])
+            for name, events in by_target.items():
+                win = self._targets.get(name)
+                if win is None or not events:
+                    continue
+                try:
+                    payload = json.dumps(events, ensure_ascii=False)
+                    win.evaluate_js(f"window.__pyEvents({payload})")
+                except Exception:
+                    pass  # 窗口已关闭等场景
 
 
 class PyApi:
     """暴露给前端 JS 的接口（pywebview js_api）。
     所有方法可能从 webview 主线程调用，App 侧方法需线程安全（现状即如此：热键线程也直接调用）。"""
 
-    def __init__(self, app_provider, win_provider=None):
+    def __init__(self, app_provider, wins=None):
         self._app_provider = app_provider  # () -> App 实例
-        self._win_provider = win_provider  # () -> pywebview 窗口
+        self._wins = wins or {}            # name -> pywebview window
 
     def get_state(self):
         """前端初始化时拉取完整状态"""
@@ -61,6 +81,7 @@ class PyApi:
             "status": getattr(app, "_status_text", ""),
             "has_api_key": bool(app.config.get_api_key("llm")),
             "base_url": app.config.get("llm", "base_url", default="https://api.deepseek.com/v1"),
+            "output_open": getattr(app, "_output_open", False),
         }
 
     def action(self, name):
@@ -81,7 +102,7 @@ class PyApi:
         return False
 
     def ask(self, question, with_image=False):
-        """问 AI（前端传参，替代原 tkinter 输入框）"""
+        """问 AI（输出面板 Tab2 输入框触发）"""
         app = self._app_provider()
         question = (question or "").strip()
         if not question:
@@ -107,21 +128,31 @@ class PyApi:
         webbrowser.open(url)
         return True
 
-    # ---------- 无边框窗口控制（贴边收缩） ----------
+    # ---------- 窗口控制 ----------
 
     def close_window(self):
-        self._win_provider().destroy()
+        self._wins["main"].destroy()
         return True
 
     def minimize_window(self):
-        self._win_provider().minimize()
+        self._wins["main"].minimize()
         return True
 
-    def expand_window(self):
-        self._app_provider()._expand_window()
+    def toggle_output(self):
+        """显示/隐藏输出面板（第二窗口，固定尺寸无 resize）"""
+        app = self._app_provider()
+        app._toggle_output_window()
         return True
 
-    def expand_panel(self, expanded):
-        """主面板宽窄切换：True 展开（含右侧历史/提问区），False 收起（仅左列）"""
-        self._app_provider()._expand_panel(bool(expanded))
+    def close_output(self):
+        """输出面板标题栏关闭按钮 = 隐藏（保留状态）"""
+        app = self._app_provider()
+        app._toggle_output_window(force_hide=True)
+        return True
+
+    def minimize_output(self):
+        """输出面板最小化（窗口仍在任务栏，状态保留）"""
+        win = self._wins.get("panel")
+        if win:
+            win.minimize()
         return True
