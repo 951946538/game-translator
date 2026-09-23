@@ -842,11 +842,12 @@ def main():
 
     bridge = EventBridge()
     holder = {}
+    win_holder = {"win": None}
     ready = threading.Event()
 
     def tk_main():
         # tkinter 在子线程内创建并 mainloop（覆盖层载体）
-        app = App(bridge, win_provider=lambda: holder.get("win"))
+        app = App(bridge, win_provider=lambda: win_holder["win"])
         holder["app"] = app
         ready.set()
         try:
@@ -860,7 +861,6 @@ def main():
     if app is None:
         raise RuntimeError("tk 侧初始化失败")
 
-    win_holder = {"win": None}
     api = PyApi(lambda: holder["app"], win_provider=lambda: win_holder["win"])
     ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
     win = webview.create_window(
