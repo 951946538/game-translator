@@ -336,11 +336,7 @@
     }
   };
 
-  // 无边框标题栏：拖动（按钮和徽章区域除外）
-  document.getElementById("titlebar").addEventListener("mousedown", e => {
-    if (e.target.closest("button")) return;
-    pywebview.api.drag_window();
-  });
+  // 窗口按钮（拖动由 pywebview 自带 easy_drag 处理：任意非交互区域按住即可拖）
   function winMin() { pywebview.api.minimize_window(); }
   function winClose() { pywebview.api.close_window(); }
 

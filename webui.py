@@ -117,20 +117,6 @@ class PyApi:
         self._win_provider().minimize()
         return True
 
-    def drag_window(self):
-        """拖动标题栏：向窗口发送 HTCAPTION 按下消息让系统接管拖动（阻塞至松手），
-        松手后检查是否贴靠屏幕边缘（贴边则收缩成竖条）"""
-        app = self._app_provider()
-        hwnd = getattr(app, "_webview_hwnd", 0)
-        if hwnd:
-            import ctypes
-            user32 = ctypes.windll.user32
-            user32.ReleaseCapture()
-            WM_NCLBUTTONDOWN, HTCAPTION = 0xA1, 2
-            user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
-        app._check_edge_dock()
-        return True
-
     def expand_window(self):
         self._app_provider()._expand_window()
         return True

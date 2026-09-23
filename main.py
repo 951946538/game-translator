@@ -11,6 +11,7 @@ import os
 import logging
 import threading
 import queue
+import time
 import traceback
 
 # 日志写入文件，便于排查问题（打包后放在 exe 旁边）
@@ -177,6 +178,8 @@ class App:
         threading.Thread(target=self._ocr_worker, daemon=True).start()
         threading.Thread(target=self._translate_worker, daemon=True).start()
         threading.Thread(target=self._preload_ocr, daemon=True).start()
+        # 贴边收缩监视：轮询主窗口位置（不依赖拖动回调，任何方式贴边都能触发）
+        threading.Thread(target=self._edge_watch_loop, daemon=True).start()
         self.root.after(100, self._poll_ui_queue)
 
     def _preload_ocr(self):
@@ -666,24 +669,34 @@ class App:
 
     # ---------- 贴边收缩（无边框主窗口） ----------
 
-    def _check_edge_dock(self):
-        """拖动结束后：窗口贴近屏幕左右边缘（≤40px）则收缩成竖条停靠"""
+    def _edge_watch_loop(self):
+        """每 0.5s 检查主窗口是否贴靠屏幕左右边缘（≤40px）→ 收缩成竖条。
+        轮询方式：不依赖拖动回调（easy_drag 的结束时机拿不到），任何方式贴边都生效。"""
         import ctypes
         import ctypes.wintypes
-        if not self._webview_hwnd or not self._win_provider:
-            return
-        try:
-            user32 = ctypes.windll.user32
-            rect = ctypes.wintypes.RECT()
-            if not user32.GetWindowRect(self._webview_hwnd, ctypes.byref(rect)):
-                return
-            sw = user32.GetSystemMetrics(0)
-            left_gap, right_gap = rect.left, sw - rect.right
-            if left_gap <= 40 or right_gap <= 40:
-                side = "left" if left_gap <= right_gap else "right"
-                self._dock(side, rect, sw)
-        except Exception:
-            logging.error("贴边检测失败:\n%s", traceback.format_exc())
+        while True:
+            time.sleep(0.5)
+            try:
+                if self._docked or not self._win_provider:
+                    continue
+                if time.time() < getattr(self, "_dock_exempt_until", 0):
+                    continue  # 刚展开的豁免期，避免恢复位置在边缘被立即收回
+                hwnd = self._webview_hwnd
+                if not hwnd:
+                    continue
+                user32 = ctypes.windll.user32
+                rect = ctypes.wintypes.RECT()
+                if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    continue
+                sw = user32.GetSystemMetrics(0)
+                if rect.right - rect.left < 100:
+                    continue  # 已是收缩态（外部改变尺寸的场景）
+                left_gap, right_gap = rect.left, sw - rect.right
+                if left_gap <= 40 or right_gap <= 40:
+                    side = "left" if left_gap <= right_gap else "right"
+                    self._dock(side, rect, sw)
+            except Exception:
+                pass
 
     def _dock(self, side, rect, screen_w):
         win = self._win_provider()
@@ -704,11 +717,20 @@ class App:
     def _expand_window(self):
         if not self._docked or not self._win_provider:
             return
+        import ctypes
+        user32 = ctypes.windll.user32
+        sw = user32.GetSystemMetrics(0)
         win = self._win_provider()
         x, y, w, h = self._saved_win_rect or (200, 200, 1180, 620)
+        # 恢复位置若仍在边缘附近，往屏幕内侧偏移（否则轮询会立即又收缩）
+        if x < 60:
+            x = 60
+        if x + w > sw - 60:
+            x = max(60, sw - 60 - w)
         win.resize(w, h)
         win.move(x, y)
         self._docked = None
+        self._dock_exempt_until = time.time() + 3  # 豁免 3 秒
         self._bridge.push("docked", {"side": None})
         logging.info("窗口已展开")
 
@@ -804,8 +826,7 @@ def main():
     win = webview.create_window(
         "游戏实时翻译", ui_path, js_api=api,
         width=1180, height=620, min_size=(860, 480),
-        frameless=True,  # 无边框：标题栏由 HTML 自绘（可拖动 + 贴边收缩）
-        easy_drag=False,
+        frameless=True,  # 无边框：标题栏由 HTML 自绘；拖动用 pywebview 自带 easy_drag
         background_color="#14141f",
     )
     win_holder["win"] = win
