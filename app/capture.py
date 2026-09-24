@@ -408,9 +408,11 @@ class RegionMonitor:
         crop = frame[y0:y1, x0:x1]
         # origin：裁剪区左上角的屏幕物理坐标（OCR 结果坐标加上它才是全屏坐标）
         origin = (self.region["left"] + x0, self.region["top"] + y0)
+        # 整帧识别（手动触发或变化区域 >75%）= 转场/换页：主程序据此清空旧译文
+        scene_reset = force or (x1 - x0) * (y1 - y0) > 0.75 * w * h
         logging.info("触发识别：%dx%d（占画面 %.0f%%）", x1 - x0, y1 - y0, 100 * (x1 - x0) * (y1 - y0) / (w * h))
         try:
-            self.on_stable(crop, origin, force)
+            self.on_stable(crop, origin, force, scene_reset=scene_reset)
         except Exception:
             logging.error("监控回调异常:\n%s", traceback.format_exc())
 

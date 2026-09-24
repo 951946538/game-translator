@@ -276,12 +276,13 @@ class App:
                     q.put(None)
                     break
 
-    def _on_stable_frame(self, frame, origin, force=False):
+    def _on_stable_frame(self, frame, origin, force=False, scene_reset=False):
         """监控线程回调：画面稳定，交给 OCR 队列（frame 为变化区域裁剪，origin 为其屏幕坐标）。
-        force=True 为 F6 手动触发，暂停状态下依然执行。"""
+        force=True 为 F6 手动触发；scene_reset=True 为转场/换页（变化区域>75%）。
+        两者都清空旧译文：手动=重译当前画面；转场=旧场景译文不该保留。"""
         if not self.paused or force:
-            if force:
-                # 手动翻译 = 翻译当前画面：清空旧译文，作废流水线中所有旧任务
+            if force or scene_reset:
+                # 清空旧译文，作废流水线中所有旧任务
                 # （清队列丢弃积压；递增世代号使正在 OCR/翻译中的旧任务结果被丢弃）
                 self._positioned_history = []
                 self._last_positioned_key = None
@@ -375,9 +376,19 @@ class App:
                         for it, t in zip(payload, translated) if t
                     ]
                     if positioned:
+                        # 场景切换兜底：新块数量多且与旧块完全无重叠 → 画面内容已整体更换
+                        # （对话推进时新对话块必与旧对话块位置重叠，不会误触发），
+                        # 旧译文全部丢弃，避免场景切换后残留
+                        old_history = self._positioned_history
+                        if old_history and len(positioned) >= 3 and not any(
+                            self._boxes_overlap(o["box"], n["box"])
+                            for o in old_history for n in positioned
+                        ):
+                            old_history = []
+                            logging.info("检测到场景切换：丢弃全部旧译文块")
                         # 跨帧累积：新块覆盖与之重叠的旧块，其余旧译文保留
                         kept = [
-                            old for old in self._positioned_history
+                            old for old in old_history
                             if not any(self._boxes_overlap(old["box"], n["box"]) for n in positioned)
                         ]
                         self._positioned_history = kept + positioned
