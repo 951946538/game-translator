@@ -111,6 +111,7 @@ class App:
         self._region_offset = (0, 0)      # 监控区域屏幕偏移（start_monitor 时更新）
         self._game_hwnd = None            # F7 捕获的游戏窗口句柄（Win 键智能屏蔽用）
         self._positioned_history = []     # 覆盖层译文累积（跨帧保留未变化区域的旧译文）
+        self._translate_gen = 0           # 翻译世代号：F6 手动翻译递增，流水线中旧任务结果作废
 
         # 队列：监控线程 -> OCR 线程 -> 翻译线程 -> UI（流水线并发）
         self.ocr_queue = queue.Queue()
@@ -261,18 +262,34 @@ class App:
             self.monitor.stop()
             self.monitor = None
 
+    def _drain_pipelines(self):
+        """丢弃流水线队列中积压的旧任务（保留 None 退出哨兵）。
+        F6 手动翻译时调用：积压的旧场景翻译若不清掉，会在新译文之后处理，
+        已清掉的旧译文会'跟着新翻译一起回来'"""
+        for q in (self.ocr_queue, self.translate_queue):
+            while True:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    break
+                if item is None:
+                    q.put(None)
+                    break
+
     def _on_stable_frame(self, frame, origin, force=False):
         """监控线程回调：画面稳定，交给 OCR 队列（frame 为变化区域裁剪，origin 为其屏幕坐标）。
         force=True 为 F6 手动触发，暂停状态下依然执行。"""
         if not self.paused or force:
             if force:
-                # 手动翻译 = 翻译当前画面：清空旧译文（避免场景切换后残留，
-                # 覆盖层与独立面板都清），重置去重键允许重译相同文本
+                # 手动翻译 = 翻译当前画面：清空旧译文，作废流水线中所有旧任务
+                # （清队列丢弃积压；递增世代号使正在 OCR/翻译中的旧任务结果被丢弃）
                 self._positioned_history = []
                 self._last_positioned_key = None
+                self._translate_gen += 1
+                self._drain_pipelines()
                 self.ui_queue.put(("overlay_clear", None))
             self._bridge.push("stage", {"text": "⟳ 正在识别…", "tone": "warn"})
-            self.ocr_queue.put((frame, origin))
+            self.ocr_queue.put((frame, origin, self._translate_gen))
 
     def _ocr_worker(self):
         """OCR 线程：丢弃积压旧帧只处理最新，识别结果交给翻译线程（流水线并发）"""
@@ -285,7 +302,7 @@ class App:
                     item = self.ocr_queue.get_nowait()
                 except queue.Empty:
                     break
-            frame, origin = item
+            frame, origin, gen = item
             try:
                 with self._ocr_lock:
                     if self.ocr_engine is None:
@@ -310,12 +327,12 @@ class App:
                     logging.info("OCR 完成：%d 行合并为 %d 个文本块", len(items), len(blocks))
                     if blocks:
                         self._bridge.push("stage", {"text": "⟳ 正在翻译…", "tone": "warn"})
-                        self.translate_queue.put(("positioned", blocks))
+                        self.translate_queue.put(("positioned", blocks, gen))
                 else:
                     text = self.ocr_engine.extract(frame)
                     if text and not is_own_ui_text(text):
                         self._bridge.push("stage", {"text": "⟳ 正在翻译…", "tone": "warn"})
-                        self.translate_queue.put(("panel", text))
+                        self.translate_queue.put(("panel", text, gen))
             except Exception as e:
                 logging.error("OCR 处理失败:\n%s", traceback.format_exc())
                 self._status(f"处理失败: {e}")
@@ -331,7 +348,9 @@ class App:
             item = self.translate_queue.get()
             if item is None:
                 break
-            kind, payload = item
+            kind, payload, gen = item
+            if gen != self._translate_gen:
+                continue  # F6 已开启新世代：这是清空前的旧任务，丢弃
             try:
                 if kind == "positioned":
                     lines = [it["text"] for it in payload]
@@ -340,6 +359,8 @@ class App:
                         continue
                     self._last_positioned_key = key
                     translated = self.translator.translate_lines(lines)
+                    if gen != self._translate_gen:
+                        continue  # 翻译期间发生了 F6：结果作废，防止旧译文跟着回来
                     fx, fy = self._dpi_fx, self._dpi_fy  # 物理 → tkinter 画布坐标
                     positioned = [
                         {
@@ -383,7 +404,7 @@ class App:
                         })
                 else:
                     translated = self.translator.translate(payload)
-                    if translated is not None:
+                    if translated is not None and gen == self._translate_gen:
                         self._bridge.push("stage", {"text": "✓ 翻译完成", "tone": "success"})
                         self.ui_queue.put(("translation", payload, translated))
             except Exception as e:
