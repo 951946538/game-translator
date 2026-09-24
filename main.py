@@ -284,6 +284,10 @@ class App:
             if force or scene_reset:
                 # 清空旧译文，作废流水线中所有旧任务
                 # （清队列丢弃积压；递增世代号使正在 OCR/翻译中的旧任务结果被丢弃）
+                logging.info(
+                    "重置译文（%s）：清空 %d 块旧译文",
+                    "F6手动" if force else "转场/换页", len(self._positioned_history),
+                )
                 self._positioned_history = []
                 self._last_positioned_key = None
                 self._translate_gen += 1
@@ -363,6 +367,7 @@ class App:
                     if gen != self._translate_gen:
                         continue  # 翻译期间发生了 F6：结果作废，防止旧译文跟着回来
                     fx, fy = self._dpi_fx, self._dpi_fy  # 物理 → tkinter 画布坐标
+                    now_t = time.time()
                     positioned = [
                         {
                             "box": [
@@ -372,6 +377,7 @@ class App:
                                 int(it["box"][3] * fy),
                             ],
                             "text": t,
+                            "t": now_t,  # 出生时间（衰减清理用）
                         }
                         for it, t in zip(payload, translated) if t
                     ]
@@ -386,10 +392,13 @@ class App:
                         ):
                             old_history = []
                             logging.info("检测到场景切换：丢弃全部旧译文块")
-                        # 跨帧累积：新块覆盖与之重叠的旧块，其余旧译文保留
+                        # 跨帧累积：新块覆盖与之重叠的旧块，其余旧译文保留；
+                        # 超过 90 秒未被覆盖更新的旧块视为过期画面，自动移除
+                        # （两个切换信号都漏检时的最终兜底：残留最多存在 90 秒）
                         kept = [
                             old for old in old_history
                             if not any(self._boxes_overlap(old["box"], n["box"]) for n in positioned)
+                            and now_t - old.get("t", now_t) < 90
                         ]
                         self._positioned_history = kept + positioned
                         if len(self._positioned_history) > 30:
@@ -425,6 +434,15 @@ class App:
     # ---------- UI 队列消费（tk 线程：仅覆盖层相关） ----------
 
     def _poll_ui_queue(self):
+        # 过期兜底：90 秒未被覆盖更新的译文块自动移除（场景切换漏检时，
+        # 即使没有新翻译发生，残留块也会到期消失）
+        if self._positioned_history:
+            now_t = time.time()
+            alive = [b for b in self._positioned_history if now_t - b.get("t", now_t) < 90]
+            if len(alive) != len(self._positioned_history):
+                self._positioned_history = alive
+                if self.overlay_mode == "inplace" and not self._overlay_hidden:
+                    self.overlay.update_positioned(list(alive))
         try:
             while True:
                 item = self.ui_queue.get_nowait()
@@ -729,6 +747,15 @@ class App:
         self.overlay_mode = target or self._MODE_CYCLE[self.overlay_mode]
         self.config.set(self.overlay_mode, "overlay_mode")
         self.config.save()
+        # 丢弃 UI 队列中积压的旧绘制指令：重建 overlay 后这些指令会把旧译文块
+        # 画到新覆盖层上且无人再清除（永久残留）
+        while True:
+            try:
+                item = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item and item[0] == "shutdown":
+                self.ui_queue.put(item)  # 退出指令保留
         try:
             self.overlay.win.destroy()
         except Exception:
