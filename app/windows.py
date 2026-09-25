@@ -45,6 +45,71 @@ def find_hwnd(title):
     return wins[0] if wins else 0
 
 
+# ---------- Win32 帮助函数（集中所有 ctypes 调用，其余模块不再直接碰 user32） ----------
+
+def process_elevated(pid):
+    """指定进程是否以管理员权限运行。无法判断返回 None。
+    UIPI 规则：普通权限进程无法抓取管理员权限窗口（F7 失败的常见原因）。"""
+    kernel32 = ctypes.windll.kernel32
+    advapi32 = ctypes.windll.advapi32
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    try:
+        h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return None
+        try:
+            token = wintypes.HANDLE()
+            if not advapi32.OpenProcessToken(h, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+                return None
+            try:
+                elev = wintypes.DWORD()
+                ret_len = wintypes.DWORD()
+                if advapi32.GetTokenInformation(token, 20, ctypes.byref(elev), 4, ctypes.byref(ret_len)):
+                    return bool(elev.value)  # TokenElevation
+            finally:
+                kernel32.CloseHandle(token)
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:
+        return None
+    return None
+
+
+def self_elevated():
+    """本进程是否以管理员权限运行"""
+    return bool(process_elevated(ctypes.windll.kernel32.GetCurrentProcessId()))
+
+
+def window_info(hwnd):
+    """窗口基本信息（诊断日志用）：标题/类名/PID，失败返回 None"""
+    user32 = ctypes.windll.user32
+    try:
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        n = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(max(n + 1, 64))
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        cls_buf = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls_buf, 64)
+        return {"title": buf.value, "cls": cls_buf.value, "pid": pid.value}
+    except Exception:
+        return None
+
+
+def client_rect(hwnd):
+    """窗口客户区的屏幕物理坐标 (x, y, w, h)，失败/过小返回 None"""
+    user32 = ctypes.windll.user32
+    rect = wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+        return None
+    pt = wintypes.POINT(0, 0)
+    user32.ClientToScreen(hwnd, ctypes.byref(pt))
+    w, h = rect.right - rect.left, rect.bottom - rect.top
+    if w < 100 or h < 100:
+        return None
+    return (pt.x, pt.y, w, h)
+
+
 class WindowManager:
     """集中管理两个 pywebview 窗口的 Win32 操作。
     wins_provider: () -> {"main": Window, "panel": Window}
@@ -197,3 +262,20 @@ class WindowManager:
         user32 = ctypes.windll.user32
         return [h for h in (self.main_hwnd, self.panel_hwnd)
                 if h and user32.IsWindowVisible(h)]
+
+    def hide_visible(self):
+        """临时隐藏所有可见窗口（F5 整屏截图前，避免自身 UI 混入画面）。
+        返回 (隐藏数量, 恢复函数)；恢复函数无条件调用安全。"""
+        user32 = ctypes.windll.user32
+        hidden = self.visible_hwnds()
+        for h in hidden:
+            user32.ShowWindow(h, 0)  # SW_HIDE
+
+        def restore():
+            for h in hidden:
+                try:
+                    user32.ShowWindow(h, 5)  # SW_SHOW
+                except Exception:
+                    pass
+
+        return len(hidden), restore

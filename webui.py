@@ -78,7 +78,7 @@ class PyApi:
         app = self._app_provider()
         region = app.config.region
         return {
-            "paused": app.paused,
+            "paused": app.live.paused,
             "overlay_mode": app.overlay_mode,
             "region": list(region) if region and region != "fullscreen" else region,
             "status": getattr(app, "_status_text", ""),
@@ -110,11 +110,7 @@ class PyApi:
         question = (question or "").strip()
         if not question:
             return False
-        threading.Thread(
-            target=app._ask_worker,
-            args=(question, bool(with_image), image_data or None),
-            daemon=True,
-        ).start()
+        app.ask_ai_async(question, bool(with_image), image_data or None)
         return True
 
     # ---------- 窗口选择器（绕开热键/前台限制的捕获入口） ----------

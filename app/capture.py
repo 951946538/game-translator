@@ -1,4 +1,9 @@
-"""区域截屏与变化检测：只在画面内容稳定变化后才触发回调，避免重复翻译"""
+"""区域截屏与变化检测：画面稳定变化后才触发回调，避免重复翻译。
+
+抓取优先级：游戏窗口直抓（PrintWindow，悬浮窗永不混入）
+         → dxcam DXGI 桌面复制（独占全屏/HDR）
+         → mss GDI 截屏 + 自身窗口矩形涂黑。
+"""
 import ctypes
 import logging
 import threading
@@ -52,17 +57,15 @@ class _BITMAPINFOHEADER(ctypes.Structure):
 
 class RegionMonitor:
     """
-    持续监控屏幕区域：
+    持续监控屏幕区域（帧差模式）：
     1. 按间隔截屏，与上一帧做差分
     2. 检测到变化后等待画面稳定（游戏动画/转场会连续变化）
-    3. 稳定后回调 on_stable(pil_image)
+    3. 稳定后回调 on_stable(frame, origin, force, scene_reset)
     """
 
-    def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable, force_ocr_ms=2500,
-                 trigger_mode="diff", input_idle_ms=3000, min_interval_ms=0, hide_own_windows=None,
-                 game_hwnd=0, exclude_rects_provider=None):
+    def __init__(self, region, interval_ms, diff_threshold, stable_ms, on_stable,
+                 force_ocr_ms=2500, min_interval_ms=0, game_hwnd=0, exclude_rects_provider=None):
         if region == "fullscreen":
-            # 全屏模式：监控主显示器整屏
             with _MSS() as sct:
                 mon = sct.monitors[1]  # monitors[0] 是所有显示器的并集，[1] 是主屏
             self.region = {"left": mon["left"], "top": mon["top"],
@@ -71,29 +74,23 @@ class RegionMonitor:
             self.region = {"left": region[0], "top": region[1], "width": region[2], "height": region[3]}
         # 监控区域在屏幕上的偏移（OCR 坐标是相对区域的，绘制时要加回该偏移）
         self.offset = (self.region["left"], self.region["top"])
-        self.trigger_mode = trigger_mode      # input: 输入触发 / diff: 持续帧差
-        self.input_idle_ms = input_idle_ms    # 输入触发模式：停止操作多久后识别
         self.interval = interval_ms / 1000
         self.diff_threshold = diff_threshold
         self.stable_ms = stable_ms
-        self.force_ocr_ms = force_ocr_ms  # 持续变化（滚动/打字机）超过该时长后按最新帧强制识别
+        self.force_ocr_ms = force_ocr_ms      # 持续变化（滚动/打字机）超时后按最新帧强制识别
         self.min_interval = min_interval_ms / 1000  # 两次自动翻译的最小间隔（节流）
-        self.hide_own_windows = hide_own_windows  # 兼容保留（截图排除已改用涂黑方案）
-        self.game_hwnd = game_hwnd or 0  # 游戏窗口句柄（F7 记录）：非零时直接从窗口抓取，悬浮窗永不混入
-        self.exclude_rects_provider = exclude_rects_provider  # 返回自身窗口屏幕矩形的回调（涂黑排除）
+        self.game_hwnd = game_hwnd or 0        # 游戏窗口句柄：非零时直接从窗口抓取
+        self.exclude_rects_provider = exclude_rects_provider  # 自身窗口矩形（涂黑排除）
         self.on_stable = on_stable
 
         self.paused = False
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread = threading.Thread(target=self._diff_loop, daemon=True)
 
-        self._prev_small = None       # 上一帧缩略灰度图（用于差分）
+        self._prev_small = None       # 上一帧缩略灰度图（差分基准）
         self._pending_frame = None    # 变化后等待稳定的帧
         self._last_change_time = 0.0
-        self._pending_since = 0.0     # 待处理帧的起始时间（用于滚动兜底）
-        self._last_input = 0.0        # 最近一次点击/滚轮时间（输入触发模式）
-        self._input_pending = False
-        self._last_processed_small = None  # 上次已识别画面的缩略图
+        self._pending_since = 0.0     # 待处理帧的起始时间（滚动兜底）
         self._prev_emit_small = None  # 上次已识别画面的网格灰度图（变化区域裁剪用）
         self._last_emit_time = 0.0    # 上次触发翻译的时间（节流用）
 
@@ -110,16 +107,10 @@ class RegionMonitor:
 
     def resume(self):
         self.paused = False
-        self._prev_small = None  # 恢复时重置基准，避免暂停期间的画面变化误判
-
-    def notify_input(self):
-        """全局点击/滚轮回调：记录输入活动时间（输入触发模式用）"""
-        if not self.paused:
-            self._last_input = time.time()
-            self._input_pending = True
+        self._prev_small = None  # 恢复时重置基准，避免暂停期间的变化误判
 
     def capture_now(self):
-        """手动触发：立即截取一帧并识别翻译（F6）。"""
+        """F6 手动触发：立即整帧识别翻译。"""
         try:
             frame = self.clean_grab()
             if frame is None:
@@ -129,92 +120,7 @@ class RegionMonitor:
         except Exception:
             logging.error("手动触发失败:\n%s", traceback.format_exc())
 
-    # ---------- 内部逻辑 ----------
-
-    def _loop(self):
-        if self.trigger_mode == "input":
-            self._input_loop()
-        else:
-            self._diff_loop()
-
-    def _input_loop(self):
-        """
-        输入触发模式：点击/滚轮/键盘停止 input_idle_ms（默认3秒）后识别一次。
-        画面与上次识别相比没有变化则跳过。
-
-        实现说明：不使用系统级鼠标钩子（pynput listener 是低级钩子，
-        每个鼠标移动事件都要过 Python，游戏鼠标 1000Hz 轮询率会拖慢全系统鼠标）。
-        改用零开销轮询：
-        - GetAsyncKeyState 检测鼠标按键按下
-        - GetLastInputInfo 时间戳变化 + 光标位置未变 => 滚轮或键盘操作
-          （纯移动鼠标时光标位置会变化，不计为触发输入）
-        """
-        import ctypes
-        import ctypes.wintypes
-
-        user32 = ctypes.windll.user32
-        VK_MOUSE_BUTTONS = (0x01, 0x02, 0x04, 0x05, 0x06)  # 左/右/中/X1/X2
-
-        class LASTINPUTINFO(ctypes.Structure):
-            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
-
-        def last_input_tick():
-            lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
-            user32.GetLastInputInfo(ctypes.byref(lii))
-            return lii.dwTime
-
-        def any_button_down():
-            return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in VK_MOUSE_BUTTONS)
-
-        pt = ctypes.wintypes.POINT()
-
-        def cursor_pos():
-            user32.GetCursorPos(ctypes.byref(pt))
-            return (pt.x, pt.y)
-
-        prev_tick = last_input_tick()
-        prev_pos = cursor_pos()
-
-        while not self._stop.is_set():
-            time.sleep(0.25)
-            if self.paused:
-                continue
-
-            try:
-                # ---- 输入检测（零钩子开销） ----
-                tick = last_input_tick()
-                pos = cursor_pos()
-                if any_button_down():
-                    self._last_input = time.time()
-                    self._input_pending = True
-                elif tick != prev_tick and pos == prev_pos:
-                    # 有新输入但光标没动：滚轮或键盘
-                    self._last_input = time.time()
-                    self._input_pending = True
-                prev_tick, prev_pos = tick, pos
-
-                # ---- 静置判定 ----
-                if not self._input_pending:
-                    continue
-                if (time.time() - self._last_input) * 1000 < self.input_idle_ms:
-                    continue  # 还在连续操作中，等停下来
-                self._input_pending = False
-
-                frame = self.clean_grab()
-                if frame is None:
-                    continue
-                small = self._gray(frame, self._DIFF_SIZE)
-
-                # 与上次已识别画面比对，没变化就不重复识别
-                if self._last_processed_small is not None and not self._frame_changed(small, self._last_processed_small):
-                    continue
-                self._last_processed_small = small
-
-                self._emit_frame(frame)
-            except Exception:
-                # 任何异常都不允许杀死监控线程
-                logging.error("输入监控循环异常:\n%s", traceback.format_exc())
-                time.sleep(1)
+    # ---------- 监控循环 ----------
 
     def _diff_loop(self):
         while not self._stop.is_set():
@@ -228,7 +134,6 @@ class RegionMonitor:
                 small = self._gray(frame, self._DIFF_SIZE)
 
                 if self._prev_small is not None and self._frame_changed(small, self._prev_small):
-                    # 画面发生变化，记录并刷新变化时间
                     if self._pending_frame is None:
                         self._pending_since = time.time()
                     self._pending_frame = frame
@@ -245,8 +150,7 @@ class RegionMonitor:
                     stable = since_change_ms >= self.stable_ms
                     forced = since_pending_ms >= self.force_ocr_ms
 
-                    # 节流：两次翻译间隔不足 min_interval 时保留待处理帧，
-                    # 等间隔到了再触发（画面静止后仍会被翻译，不会漏）
+                    # 节流：间隔不足时保留待处理帧，等间隔到了再触发（不漏翻）
                     if (stable or forced) and since_emit_s >= self.min_interval:
                         self._emit()
                         if forced and not stable:
@@ -256,9 +160,11 @@ class RegionMonitor:
                 logging.error("帧差监控循环异常:\n%s", traceback.format_exc())
                 time.sleep(1)
 
+    # ---------- 抓取 ----------
+
     def _grab_window(self):
         """直接从游戏窗口抓取客户区像素（PrintWindow/BitBlt，OBS 窗口捕获原理）。
-        与截屏不同：悬浮在游戏上方的任何窗口（包括本工具面板）都不会出现在画面里。
+        悬浮在游戏上方的任何窗口（包括本工具面板）都不会出现在画面里。
         失败（窗口关闭/游戏禁止抓取返回黑图）返回 None。"""
         hwnd = self.game_hwnd
         if not hwnd:
@@ -273,7 +179,6 @@ class RegionMonitor:
                 self.game_hwnd = 0
                 return None
 
-            # 客户区尺寸
             cr = wintypes.RECT()
             if not user32.GetClientRect(hwnd, ctypes.byref(cr)):
                 return None
@@ -281,7 +186,6 @@ class RegionMonitor:
             if cw < 50 or ch < 50:
                 return None
 
-            # 整窗尺寸（PrintWindow 抓整窗，再裁客户区）
             wr = wintypes.RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(wr))
             ww, wh = wr.right - wr.left, wr.bottom - wr.top
@@ -297,7 +201,7 @@ class RegionMonitor:
                     # PW_RENDERFULLCONTENT=2：DirectX/DWM 渲染内容（现代游戏）也能抓到
                     ok = user32.PrintWindow(hwnd, hdc_mem, 2)
                     if not ok:
-                        gdi32.BitBlt(hdc_mem, 0, 0, ww, wh, hdc_win, 0, 0, 0x00CC0020)  # SRCCOPY
+                        gdi32.BitBlt(hdc_mem, 0, 0, ww, wh, hdc_win, 0, 0, 0x00CC0020)
 
                     bmi = _BITMAPINFOHEADER()
                     bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
@@ -323,7 +227,7 @@ class RegionMonitor:
                     # 全黑检测：部分游戏/驱动禁止抓取，返回纯黑图
                     if frame.size == 0 or frame.std() < 1.0:
                         logging.warning("窗口抓取返回黑图（游戏可能禁止抓取），回退屏幕截图")
-                        self.game_hwnd = 0  # 后续直接走屏幕模式，避免反复尝试
+                        self.game_hwnd = 0
                         return None
                     return frame
                 finally:
@@ -337,8 +241,7 @@ class RegionMonitor:
             return None
 
     def _screen_grab_raw(self):
-        """屏幕抓帧（未涂黑）：dxcam(DXGI) 优先——独占全屏游戏/HDR 下 GDI 截屏
-        会得到黑图，DXGI 桌面复制两种场景都能抓；黑图/失败自动回退 mss"""
+        """屏幕抓帧（未涂黑）：dxcam(DXGI) 优先，黑图/失败自动回退 mss。"""
         frame = _dxcam_grab(self.region)
         if frame is not None and frame.std() >= 1.0:
             return frame
@@ -346,8 +249,24 @@ class RegionMonitor:
             shot = sct.grab(self.region)
         return np.asarray(shot)[:, :, :3]
 
+    def _mask_own_windows(self, frame):
+        """自身窗口覆盖的矩形涂黑——面板文字在像素层面被抹掉，无时序依赖。"""
+        if not self.exclude_rects_provider:
+            return
+        try:
+            rects = self.exclude_rects_provider() or []
+        except Exception:
+            return
+        ox, oy = self.offset
+        h, w = frame.shape[:2]
+        for rx, ry, rw, rh in rects:
+            x1, y1 = max(0, int(rx) - ox), max(0, int(ry) - oy)
+            x2, y2 = min(w, int(rx + rw) - ox), min(h, int(ry + rh) - oy)
+            if x2 > x1 and y2 > y1:
+                frame[y1:y2, x1:x2] = 0
+
     def raw_grab(self):
-        """常规截帧（帧差检测用）：优先游戏窗口直接抓取，否则截屏并涂黑自身窗口区域"""
+        """常规截帧（帧差检测用）：窗口直抓 → 截屏+涂黑。"""
         frame = self._grab_window()
         if frame is not None:
             return frame
@@ -356,8 +275,7 @@ class RegionMonitor:
         return frame
 
     def clean_grab(self):
-        """出帧抓取（送 OCR/视觉模型）：优先游戏窗口直接抓取（悬浮窗永不混入），
-        否则截屏并涂黑自身窗口区域（像素级排除，无时序依赖）"""
+        """出帧抓取（送 OCR/视觉模型）：窗口直抓 → 截屏+涂黑。"""
         frame = self._grab_window()
         if frame is not None:
             return frame
@@ -365,33 +283,17 @@ class RegionMonitor:
         self._mask_own_windows(frame)
         return frame
 
-    def _mask_own_windows(self, frame):
-        """把本工具自身窗口覆盖的矩形区域涂黑——面板文字在像素层面被抹掉，
-        不依赖隐藏窗口的时序（涂黑区域 OCR 不识别、视觉模型忽略）"""
-        if not self.exclude_rects_provider:
-            return
-        try:
-            rects = self.exclude_rects_provider() or []
-        except Exception:
-            return
-        ox, oy = self.offset  # region 的屏幕物理原点
-        h, w = frame.shape[:2]
-        for rx, ry, rw, rh in rects:
-            x1, y1 = max(0, int(rx) - ox), max(0, int(ry) - oy)
-            x2, y2 = min(w, int(rx + rw) - ox), min(h, int(ry + rh) - oy)
-            if x2 > x1 and y2 > y1:
-                frame[y1:y2, x1:x2] = 0
+    # ---------- 出帧 ----------
 
     def _emit_frame(self, frame, force=False):
-        """裁剪出变化区域后触发识别（对话更新时只识别那一小块，OCR 计算量降为原来的几分之一）。
-        force=True 表示 F6 手动触发：整帧识别（配合主程序清空旧译文，完整重建当前画面的翻译）。"""
+        """裁剪变化区域后触发识别（对话更新时只识别那一小块，OCR 量降为几分之一）。
+        force=True（F6）整帧识别，配合上层清空旧译文完整重建。"""
         now = time.time()
         if not force and now - self._last_emit_time < self.min_interval:
-            return  # 自动翻译节流兜底（input 模式/边界场景）；F6 手动触发不受限
+            return  # 自动翻译节流；F6 手动触发不受限
         self._last_emit_time = now
         h, w = frame.shape[:2]
         if force:
-            # 手动触发：整帧识别——旧译文已被清空，必须重新翻译整个画面
             x0, y0, x1, y1 = 0, 0, w, h
         else:
             x0, y0, x1, y1 = self._change_bbox(frame)
@@ -406,11 +308,11 @@ class RegionMonitor:
 
         self._prev_emit_small = self._gray(frame, self._GRID)
         crop = frame[y0:y1, x0:x1]
-        # origin：裁剪区左上角的屏幕物理坐标（OCR 结果坐标加上它才是全屏坐标）
         origin = (self.region["left"] + x0, self.region["top"] + y0)
-        # 整帧识别（手动触发或变化区域 >75%）= 转场/换页：主程序据此清空旧译文
+        # 整帧识别（手动或变化区域>75%）= 转场/换页：上层据此清空旧译文
         scene_reset = force or (x1 - x0) * (y1 - y0) > 0.75 * w * h
-        logging.info("触发识别：%dx%d（占画面 %.0f%%）", x1 - x0, y1 - y0, 100 * (x1 - x0) * (y1 - y0) / (w * h))
+        logging.info("触发识别：%dx%d（占画面 %.0f%%）", x1 - x0, y1 - y0,
+                     100 * (x1 - x0) * (y1 - y0) / (w * h))
         try:
             self.on_stable(crop, origin, force, scene_reset=scene_reset)
         except Exception:
@@ -419,12 +321,14 @@ class RegionMonitor:
     def _emit(self):
         frame_out = self._pending_frame
         self._pending_frame = None
-        # 出帧时重新干净截取：窗口模式抓游戏内容（无悬浮窗），屏幕模式隐藏自身窗口
+        # 出帧时重新干净截取（待处理帧是常规截图，可能含面板内容）
         clean = self.clean_grab()
         if clean is not None:
             frame_out = clean
         if frame_out is not None:
             self._emit_frame(frame_out)
+
+    # ---------- 帧差判定 ----------
 
     # 变化检测网格（宽 x 高）
     _GRID = (80, 45)
@@ -435,7 +339,7 @@ class RegionMonitor:
     _DIFF_MIN_RATIO = 0.0015    # 变化格子占比超过 0.15%（约一行文字）即触发
 
     def _frame_changed(self, a, b):
-        """逐格差分判定画面是否变化（a/b 为二维灰度图，对单行文字变化敏感）"""
+        """逐格差分判定画面是否变化（对单行文字变化敏感）"""
         diff_map = np.abs(a.astype(np.int16) - b.astype(np.int16))
         return (diff_map > self._DIFF_CELL_THRESHOLD).mean() > self._DIFF_MIN_RATIO
 
