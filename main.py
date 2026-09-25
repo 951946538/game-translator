@@ -137,6 +137,16 @@ class App:
     # ---------- 功能回调（LiveTranslate 的 ctx 接口） ----------
 
     @property
+    def bridge(self):
+        """features 的 ctx 约定属性（App 内部叫 _bridge）"""
+        return self._bridge
+
+    @property
+    def overlay_hidden(self):
+        """features 的 ctx 约定属性（App 内部叫 _overlay_hidden）"""
+        return self._overlay_hidden
+
+    @property
     def dpi_factors(self):
         return self._dpi_fx, self._dpi_fy
 
