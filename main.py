@@ -176,7 +176,7 @@ class App:
         if self.live.paused:
             return "⏸ 已暂停"
         if not self.config.region:
-            return "等待选择区域\n按 F7 捕获游戏窗口"
+            return "打开输出面板\n点「🪟 选择窗口」捕获游戏"
         return "● 监控中"
 
     def _set_stage(self, text, tone="info"):
@@ -287,14 +287,19 @@ class App:
         region = self._get_foreground_rect(hwnd)
         if not region:
             if hwnd is None:
-                self.status("请先点击游戏窗口，再按 F7（或用「选择窗口」按钮选取）")
+                self.status("请在窗口选择器中点击游戏窗口")
             return
         self.config.region = region
-        self.live.set_paused(True)  # 进入游戏窗口：默认仅手动触发（F9 恢复自动）
+        self.live.set_paused(True)  # 进入游戏窗口：默认仅手动触发（自动翻译按钮恢复）
         self.status(f"监控中 · 游戏窗口 {region}（自动翻译已关闭）")
         self.live.clear()
-        self._set_stage("⏸ 自动翻译已关闭\nF6/F5 手动 · F9 恢复自动")
+        self._set_stage("⏸ 自动翻译已关闭\n手动翻译或开自动翻译在输出面板")
         self.live.start(region, game_hwnd=self._game_hwnd)
+        if self.wm.panel_shape == "lyrics":
+            # 用户在歌词模式下捕获窗口：立即框定歌词覆盖区域并开始自动翻译
+            self._pre_lyrics_region = region
+            self._apply_lyrics_region()
+            return
         if self.overlay_mode == "panel":
             self._do_toggle_overlay_mode(target="inplace")
         else:
@@ -393,8 +398,10 @@ class App:
         依赖游戏窗口直抓（PrintWindow）——歌词面板浮在游戏上但不会入画；
         未捕获游戏窗口时提示先捕获（截屏模式会把歌词面板自己截进去）。"""
         if not self._game_hwnd:
-            self.status("歌词模式需先「选择窗口」捕获游戏窗口")
-            self._bridge.push("lyrics", None)
+            # 未捕获游戏窗口：歌词区域必须靠窗口直抓（截屏模式会把歌词面板自己截进去），
+            # 自动弹出窗口选择器引导用户捕获
+            self.status("歌词模式需先捕获游戏窗口（已为你打开选择器）")
+            self._bridge.push("open_picker", None)
             return False
         if first_entry or self._pre_lyrics_region is None:
             self._pre_lyrics_region = self.config.region  # 记住进入前的区域

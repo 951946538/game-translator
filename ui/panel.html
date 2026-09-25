@@ -293,7 +293,7 @@
     <!-- Tab 2: 截图直译 + AI 对话 -->
     <div v-show="tab==='chat'" class="pane">
       <div class="list" ref="chatList">
-        <div v-if="!chat.length" class="empty"><div class="big">✨</div>按 F5 截图直译，或直接提问<br>截图卡片上的「💬 追问」可针对该图继续提问</div>
+        <div v-if="!chat.length" class="empty"><div class="big">✨</div>点「截图直译」或直接提问<br>截图卡片上的「💬 追问」可针对该图继续提问</div>
         <div v-for="c in chat" :key="c.id" class="card">
           <div class="card-head"><span class="card-title">{{ c.title }}</span><span class="card-time">{{ c.time }}</span></div>
           <img v-if="c.thumb" :src="c.thumb">
@@ -456,6 +456,10 @@ createApp({
         }
         else if (kind === "lyrics") {
           lyricText.value = data || "";
+        }
+        else if (kind === "open_picker") {
+          // 歌词模式未捕获游戏窗口：Python 请求弹出窗口选择器
+          openWinPicker();
         }
         if (kind === "translation") {
           live.value.push({ id: ++uid, time: now(), original: data.original, translated: data.translated });

@@ -48,6 +48,30 @@ class ScreenshotTranslate:
 
     # ---------- 内部 ----------
 
+    def _grab_any_frame(self):
+        """抓一帧：有监控区域用 live 的干净抓取（窗口直抓/涂黑），
+        没有则整屏截取 + 涂黑自身窗口（截图直译不依赖先选窗口）。"""
+        frame = self.ctx.live.clean_grab()
+        if frame is not None:
+            return frame
+        try:
+            import mss as _mss
+            import numpy as np
+            _MSS = getattr(_mss, "MSS", _mss.mss)
+            with _MSS() as sct:
+                mon = sct.monitors[1]
+                shot = sct.grab(mon)
+            frame = np.asarray(shot)[:, :, :3]
+            for rx, ry, rw, rh in (self.ctx.wm.own_window_rects() or []):
+                x1, y1 = max(0, int(rx) - mon["left"]), max(0, int(ry) - mon["top"])
+                x2, y2 = min(frame.shape[1], int(rx + rw) - mon["left"]), min(frame.shape[0], int(ry + rh) - mon["top"])
+                if x2 > x1 and y2 > y1:
+                    frame[y1:y2, x1:x2] = 0
+        except Exception:
+            logging.error("整屏抓取失败:\n%s", traceback.format_exc())
+            return None
+        return frame
+
     def _grab_full_frame(self):
         """F5 专用抓屏：临时隐藏自身窗口，等 DWM 合成更新（250ms）后
         截完整游戏画面（无涂黑块、无工具 UI 混入），截完立即恢复。"""
@@ -55,7 +79,7 @@ class ScreenshotTranslate:
         try:
             if n_hidden:
                 time.sleep(0.25)  # 等 DWM 完成合成更新（残影会被截到）
-            return self.ctx.live.clean_grab()
+            return self._grab_any_frame()
         finally:
             restore()
 
@@ -98,7 +122,7 @@ class ScreenshotTranslate:
                 thumb = image_b64  # 引用历史截图提问：直接用该图
             elif with_image:
                 self.ctx.bridge.push("stage", {"text": "⟳ 截图发送中…", "tone": "warn"})
-                frame = self.ctx.live.clean_grab()
+                frame = self._grab_any_frame()
                 if frame is not None:
                     thumb = _thumb_b64(frame)
 

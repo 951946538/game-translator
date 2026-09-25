@@ -18,6 +18,7 @@ class EventBridge:
         "state": ("main", "panel"),           # 暂停/显示模式：两窗都要（面板工具栏标签）
         "lyrics": ("panel",),                 # 歌词 tab（输出面板）
         "output_state": ("main",),
+        "open_picker": ("panel",),            # 歌词模式未捕获游戏窗口：自动弹窗口选择器
         # 其余事件（vision_start / ask_start / translation 等）默认发两窗：
         # 主窗亮红点，输出窗渲染内容
     }
