@@ -110,6 +110,83 @@ def client_rect(hwnd):
     return (pt.x, pt.y, w, h)
 
 
+def window_rect(hwnd):
+    """整窗的屏幕物理矩形 (x, y, w, h)，失败返回 None"""
+    user32 = ctypes.windll.user32
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    w, h = rect.right - rect.left, rect.bottom - rect.top
+    if w <= 0 or h <= 0:
+        return None
+    return (rect.left, rect.top, w, h)
+
+
+def grab_window_thumb(hwnd, max_w=280):
+    """窗口缩略图（PrintWindow 抓像素 → JPEG base64 data URI）。
+    窗口选择器 Alt+Tab 式网格用。失败返回 None。"""
+    try:
+        import base64
+        import ctypes as _ct
+        import numpy as np
+        import cv2
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        rect = window_rect(hwnd)
+        if not rect:
+            return None
+        _, _, ww, wh = rect
+
+        hdc_win = user32.GetWindowDC(hwnd)
+        if not hdc_win:
+            return None
+        try:
+            hdc_mem = gdi32.CreateCompatibleDC(hdc_win)
+            hbmp = gdi32.CreateCompatibleBitmap(hdc_win, ww, wh)
+            old = gdi32.SelectObject(hdc_mem, hbmp)
+            try:
+                ok = user32.PrintWindow(hwnd, hdc_mem, 2)  # PW_RENDERFULLCONTENT
+                if not ok:
+                    gdi32.BitBlt(hdc_mem, 0, 0, ww, wh, hdc_win, 0, 0, 0x00CC0020)
+
+                class _BMI(_ct.Structure):
+                    _fields_ = [
+                        ("biSize", _ct.c_uint32), ("biWidth", _ct.c_int32),
+                        ("biHeight", _ct.c_int32), ("biPlanes", _ct.c_uint16),
+                        ("biBitCount", _ct.c_uint16), ("biCompression", _ct.c_uint32),
+                        ("biSizeImage", _ct.c_uint32), ("biXPelsPerMeter", _ct.c_int32),
+                        ("biYPelsPerMeter", _ct.c_int32), ("biClrUsed", _ct.c_uint32),
+                        ("biClrImportant", _ct.c_uint32),
+                    ]
+
+                bmi = _BMI()
+                bmi.biSize = _ct.sizeof(_BMI)
+                bmi.biWidth, bmi.biHeight = ww, wh
+                bmi.biPlanes, bmi.biBitCount, bmi.biCompression = 1, 32, 0
+                buf = _ct.create_string_buffer(ww * wh * 4)
+                if gdi32.GetDIBits(hdc_mem, hbmp, 0, wh, buf, _ct.byref(bmi), 0) != wh:
+                    return None
+                img = np.frombuffer(buf, dtype=np.uint8).reshape(wh, ww, 4)
+                img = np.flipud(img)[:, :, :3][:, :, ::-1]  # bottom-up BGRA → RGB
+                if img.size == 0 or img.std() < 1.0:
+                    return None  # 黑图（禁止抓取）
+                if ww > max_w:  # 缩到统一宽度（网格整齐 + 编码小）
+                    img = cv2.resize(img, (max_w, max(1, round(wh * max_w / ww))))
+                ok, buf2 = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 72])
+                if not ok:
+                    return None
+                return "data:image/jpeg;base64," + base64.b64encode(buf2).decode("ascii")
+            finally:
+                gdi32.SelectObject(hdc_mem, old)
+                gdi32.DeleteObject(hbmp)
+                gdi32.DeleteDC(hdc_mem)
+        finally:
+            user32.ReleaseDC(hwnd, hdc_win)
+    except Exception:
+        return None
+
+
 class WindowManager:
     """集中管理两个 pywebview 窗口的 Win32 操作。
     wins_provider: () -> {"main": Window, "panel": Window}
@@ -122,6 +199,7 @@ class WindowManager:
         self.main_hwnd = 0
         self._panel_hwnd = 0
         self.panel_shape = "normal"  # normal / lyrics（「歌词」tab 驱动）
+        self.lyrics_shape = None     # 歌词形态尺寸 {"w_ratio": 0.85, "h": 170}（config 传入）
 
     @property
     def panel_hwnd(self):
@@ -180,7 +258,7 @@ class WindowManager:
 
     def position_panel(self):
         """按当前形态定位输出面板（逻辑像素，pywebview 处理 DPI）。
-        lyrics=宽扁横条贴屏幕底部 / normal=屏幕正中央"""
+        lyrics=宽扁横条贴屏幕底部（宽高可调）/ normal=屏幕正中央"""
         win = self.get_win("panel")
         if not win:
             return
@@ -190,14 +268,33 @@ class WindowManager:
         except Exception:
             sw, sh = 1920, 1080
         if self.panel_shape == "lyrics":
-            w = min(PANEL_LYRICS_MAX_W, int(sw * 0.85))
-            h = PANEL_LYRICS_H
+            shape = self.lyrics_shape or {"w_ratio": 0.85, "h": 170}
+            w_ratio = min(0.95, max(0.4, shape.get("w_ratio", 0.85)))
+            h = int(min(340, max(110, shape.get("h", 170))))
+            w = min(PANEL_LYRICS_MAX_W, int(sw * w_ratio))
             win.resize(w, h)
+            # 保持水平居中，垂直贴底（用户拖动过的 x/y 由 sync 接口另行同步）
             win.move((sw - w) // 2, max(20, sh - h - 60))
         else:
             w, h = PANEL_NORMAL_SIZE
             win.resize(w, h)
             win.move((sw - w) // 2, max(20, (sh - h) // 2))
+
+    def adjust_lyrics(self, dw_ratio=0.0, dh=0):
+        """调整歌词形态尺寸（宽按屏幕比例步进，高按像素档位），返回新尺寸。"""
+        shape = dict(self.lyrics_shape or {"w_ratio": 0.85, "h": 170})
+        shape["w_ratio"] = round(min(0.95, max(0.4, shape.get("w_ratio", 0.85) + dw_ratio)), 2)
+        shape["h"] = int(min(340, max(110, shape.get("h", 170) + dh)))
+        self.lyrics_shape = shape
+        self.position_panel()
+        return shape
+
+    def panel_window_rect(self):
+        """输出面板整窗的屏幕物理矩形（歌词模式监控区域同步用）"""
+        hwnd = self.panel_hwnd
+        if not hwnd or not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return None
+        return window_rect(hwnd)
 
     def set_panel_shape(self, shape):
         """歌词 tab 驱动的形态切换：lyrics（宽扁横条）/ normal（常规面板）"""

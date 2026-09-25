@@ -5,13 +5,11 @@
   features/live.py        实时翻译（监控→OCR→翻译流水线，覆盖层/独立面板显示）
   features/screenshot.py  截图直译 + 问 AI（视觉模型，流式输出）
   features/lyrics.py      歌词模式（订阅实时翻译结果，纯展示）
-  main.App                组装层：窗口/热键/捕获目标管理，不包含功能逻辑
+  main.App                组装层：窗口/捕获目标管理，不包含功能逻辑
 
 Win32 全部集中在 app/windows.py（窗口管理）/ app/capture.py（抓取）/
-  app/overlay.py（点击穿透）/ app/hotkeys.py（热键），main.py 零 ctypes。
-
-热键：F5 截图直译 | F6 立即翻译 | F7 捕获游戏窗口 | F8 框选区域
-      F9 暂停/恢复自动翻译 | F11 覆盖原文/独立面板
+  app/overlay.py（点击穿透），main.py 零 ctypes。
+操作全部在输出面板（无全局热键）：选择窗口 / 立即翻译 / 截图直译 / 歌词。
 """
 import sys
 import os
@@ -55,9 +53,8 @@ from app.config import Config
 from app.translator import Translator
 from app.overlay import OverlayWindow
 from app.region_select import select_region
-from app.hotkeys import HotkeyManager, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F11
 from app.windows import (
-    WindowManager, find_hwnd, client_rect, window_info,
+    WindowManager, find_hwnd, client_rect, window_rect, window_info,
     process_elevated, self_elevated, TITLE_MAIN, TITLE_PANEL,
 )
 from app.features.live import LiveTranslate
@@ -126,11 +123,13 @@ class App:
 
         self.ui_queue = queue.Queue()  # 仅 tk 线程消费（覆盖层绘制/窗口关闭）
         self._game_hwnd = None         # F7 捕获的游戏窗口句柄
+        self._pre_lyrics_region = None  # 歌词模式前的监控区域（离开时恢复）
 
         # ---------- 组装三个功能（互相独立） ----------
         self.live = LiveTranslate(self)             # 实时翻译
         self.screenshot = ScreenshotTranslate(self)  # 截图直译 + 问 AI
         self.lyrics = Lyrics(bridge)                 # 歌词（订阅实时翻译结果）
+        self.wm.lyrics_shape = self.config.get("lyrics_shape", default=None)
 
         threading.Thread(target=self.wm.keep_on_top_loop, daemon=True).start()
         self.root.after(100, self._poll_ui_queue)
@@ -378,11 +377,69 @@ class App:
             logging.error("输出面板切换失败:\n%s", traceback.format_exc())
 
     def _set_panel_shape(self, shape):
-        """输出面板形态切换（「歌词」tab 驱动）：lyrics 宽扁横条 / normal 常规"""
+        """输出面板形态切换（「歌词」tab 驱动）：lyrics 宽扁横条 / normal 常规。
+        歌词模式：监控区域 = 歌词窗口覆盖的游戏区域（只翻译盖住的部分）。"""
         try:
             self.wm.set_panel_shape(shape)
+            if shape == "lyrics":
+                self._apply_lyrics_region()
+            else:
+                self._restore_region()
         except Exception:
             logging.error("面板形态切换失败:\n%s", traceback.format_exc())
+
+    def _apply_lyrics_region(self, first_entry=False):
+        """歌词模式：把监控区域切换为歌词窗口当前覆盖的屏幕矩形。
+        依赖游戏窗口直抓（PrintWindow）——歌词面板浮在游戏上但不会入画；
+        未捕获游戏窗口时提示先捕获（截屏模式会把歌词面板自己截进去）。"""
+        if not self._game_hwnd:
+            self.status("歌词模式需先「选择窗口」捕获游戏窗口")
+            self._bridge.push("lyrics", None)
+            return False
+        if first_entry or self._pre_lyrics_region is None:
+            self._pre_lyrics_region = self.config.region  # 记住进入前的区域
+        # 歌词窗口屏幕矩形 → 游戏窗口客户区坐标（RegionMonitor 直抓客户区）
+        prect = self.wm.panel_window_rect()
+        grect = client_rect(self._game_hwnd)
+        if not prect or not grect:
+            return False
+        gx, gy, gw, gh = grect
+        px, py, pw, ph = prect
+        # 求交集（歌词窗口可能部分移出游戏窗口）
+        x1, y1 = max(px, gx), max(py, gy)
+        x2, y2 = min(px + pw, gx + gw), min(py + ph, gy + gh)
+        if x2 - x1 < 100 or y2 - y1 < 60:
+            self.status("歌词窗口未覆盖到游戏画面，请拖到游戏文字区域")
+            return False
+        region = (x1 - gx, y1 - gy, x2 - x1, y2 - y1)  # 客户区相对坐标
+        self.live.clear()
+        self.live.start(region, game_hwnd=self._game_hwnd)
+        # 歌词模式默认开启自动翻译（横条盖住对话行，来新对话自动出歌词）
+        if self.live.paused:
+            self.live.set_paused(False)
+        self._push_state()
+        return True
+
+    def _restore_region(self):
+        """离开歌词模式：恢复原监控区域。"""
+        if self._pre_lyrics_region is not None:
+            self.live.clear()
+            self.live.start(self._pre_lyrics_region, game_hwnd=self._game_hwnd)
+            self._pre_lyrics_region = None
+            self._push_state()
+
+    def _sync_lyrics_region(self):
+        """歌词窗口移动/调整后重新框定（前端拖动结束/尺寸按钮触发）。"""
+        if self.wm.panel_shape == "lyrics":
+            self._apply_lyrics_region()
+
+    def _adjust_lyrics(self, dw_ratio=0.0, dh=0):
+        """调整歌词形态宽高并重新框定监控区域，尺寸存 config。"""
+        shape = self.wm.adjust_lyrics(dw_ratio, dh)
+        self.config.set(shape, "lyrics_shape")
+        self.config.save()
+        self._sync_lyrics_region()
+        return shape
 
     # ---------- 生命周期 ----------
 
@@ -390,8 +447,6 @@ class App:
         """统一清理后进程级退出（webview 隐藏窗 destroy 会死锁）。"""
         try:
             self.live.stop()
-            if getattr(self, "_hotkeys", None):
-                self._hotkeys.stop()
             self.config.save()
         except Exception:
             pass
@@ -404,16 +459,6 @@ class App:
             self.live.start(self.config.region, game_hwnd=self._game_hwnd)
         self.overlay.update_status(self.translator.backend, self.live.paused)
         self._push_state()
-
-        self._hotkeys = HotkeyManager({
-            VK_F5: self.vision_translate_async,
-            VK_F6: self.trigger_now_async,
-            VK_F7: self.set_fullscreen_async,
-            VK_F8: self.select_region_async,
-            VK_F9: self.toggle_pause,
-            VK_F11: self.toggle_overlay_mode,
-        })
-        self._hotkeys.start()
         self.root.mainloop()
 
 

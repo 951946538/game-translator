@@ -116,9 +116,10 @@ class PyApi:
     # ---------- 窗口选择器（绕开热键/前台限制的捕获入口） ----------
 
     def list_windows(self):
-        """枚举当前打开的可见顶层窗口（排除本工具自身），供「选择窗口」列表展示"""
+        """枚举当前打开的可见顶层窗口（含缩略图），供「选择窗口」网格展示"""
         import ctypes
         import ctypes.wintypes as wintypes
+        from app.windows import grab_window_thumb
         app = self._app_provider()
         user32 = ctypes.windll.user32
         exclude = app.wm.exclude_hwnds()
@@ -156,6 +157,10 @@ class PyApi:
             return True
 
         user32.EnumWindows(cb, 0)
+        # 缩略图（PrintWindow 逐窗抓取，几十 ms/窗）
+        for it in result:
+            it["thumb"] = grab_window_thumb(it["hwnd"])
+        result.sort(key=lambda x: -x["pid"])  # 最近活跃的排前面（PID 大致近似）
         return result
 
     def capture_window(self, hwnd):
@@ -196,9 +201,7 @@ class PyApi:
         app = self._app_provider()
         try:
             app.config.save()
-            app.stop_monitor()
-            if getattr(app, "_hotkeys", None):
-                app._hotkeys.stop()
+            app.live.stop()
         except Exception:
             pass
         os._exit(0)
@@ -241,6 +244,15 @@ class PyApi:
     def set_panel_shape(self, shape):
         """输出面板形态：'lyrics'（桌面歌词横条）/ 'normal'（常规面板），由歌词 tab 驱动"""
         self._app_provider()._set_panel_shape(str(shape))
+        return True
+
+    def adjust_lyrics(self, dw_ratio=0.0, dh=0):
+        """歌词横条尺寸调整（宽按屏宽比例步进/高按像素），并重新框定监控区域"""
+        return self._app_provider()._adjust_lyrics(float(dw_ratio), int(dh))
+
+    def sync_lyrics_region(self):
+        """歌词窗口拖动后手动重新框定（监控区域=歌词窗口当前覆盖的游戏区域）"""
+        self._app_provider()._sync_lyrics_region()
         return True
 
     def toggle_overlay_visible(self):

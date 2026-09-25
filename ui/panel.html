@@ -73,6 +73,27 @@
   }
   .lyrics-text .hint { font-size: 12px; color: var(--text-dim); }
 
+  /* 歌词模式：顶部拖动把手（pywebview 原生拖区） */
+  .lyrics-drag {
+    position: absolute; top: 0; left: 0; right: 0; height: 18px;
+    cursor: move; z-index: 55;
+  }
+  /* 歌词模式控制条：底部悬停浮现（宽高调节 / 重新框定 / 返回） */
+  .lyrics-ctrl {
+    position: fixed; bottom: 6px; left: 50%; transform: translateX(-50%); z-index: 60;
+    display: flex; gap: 6px; align-items: center;
+    background: rgba(49,50,68,.85); border-radius: 999px; padding: 4px 8px;
+    opacity: .3; transition: opacity .15s;
+  }
+  .lyrics-ctrl:hover { opacity: 1; }
+  .lyrics-ctrl button {
+    border: none; background: transparent; color: var(--text-dim);
+    font-family: inherit; font-size: 12px; border-radius: 6px;
+    padding: 4px 9px; cursor: pointer;
+  }
+  .lyrics-ctrl button:hover { background: var(--input); color: var(--text); }
+  .lyrics-ctrl .sep { width: 1px; height: 14px; background: var(--input); }
+
   /* 歌词形态的返回出口：右上角悬停浮现（平时半隐不挡视线） */
   .lyrics-exit {
     position: fixed; top: 6px; right: 8px; z-index: 60;
@@ -83,31 +104,44 @@
   }
   .lyrics-exit:hover { opacity: 1; color: var(--text); }
 
-  /* 窗口选择器模态 */
+  /* 窗口选择器模态（Alt+Tab 式缩略图网格） */
   .wp-mask {
     position: fixed; inset: 0; z-index: 80;
     background: rgba(0,0,0,.55); backdrop-filter: blur(3px);
     display: flex; align-items: center; justify-content: center;
   }
   .wp-modal {
-    width: min(520px, 90%); max-height: 70%;
+    width: min(680px, 92%); max-height: 78%;
     background: var(--panel-solid, #181825); border: 1px solid rgba(255,255,255,.08);
     border-radius: 14px; padding: 16px;
     display: flex; flex-direction: column; gap: 10px;
   }
   .wp-modal h3 { font-size: 14px; color: var(--accent); }
   .wp-modal .hint { font-size: 11px; color: var(--text-dim); }
-  .wp-list { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-  .wp-list::-webkit-scrollbar { width: 8px; }
-  .wp-list::-webkit-scrollbar-thumb { background: var(--input); border-radius: 4px; }
-  .wp-item {
-    padding: 10px 12px; border-radius: 9px; background: var(--input);
-    font-size: 12.5px; cursor: pointer; transition: background .12s;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  .wp-grid {
+    overflow-y: auto; display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 10px; align-content: start;
   }
-  .wp-item:hover { background: var(--input-hover, #45475a); }
-  .wp-item .pid { color: var(--text-dim); font-size: 10px; margin-left: 8px; }
-  .wp-empty { font-size: 12px; color: var(--text-dim); text-align: center; padding: 20px 0; }
+  .wp-grid::-webkit-scrollbar { width: 8px; }
+  .wp-grid::-webkit-scrollbar-thumb { background: var(--input); border-radius: 4px; }
+  .wp-item {
+    border-radius: 10px; background: var(--input); cursor: pointer;
+    padding: 8px; transition: all .12s; border: 2px solid transparent;
+    display: flex; flex-direction: column; gap: 6px; overflow: hidden;
+  }
+  .wp-item:hover { background: var(--input-hover, #45475a); border-color: var(--accent); }
+  .wp-item img {
+    width: 100%; aspect-ratio: 16/10; object-fit: cover; object-position: top;
+    border-radius: 6px; background: #111; display: block;
+  }
+  .wp-item .no-thumb {
+    width: 100%; aspect-ratio: 16/10; border-radius: 6px; background: #111;
+    display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 22px;
+  }
+  .wp-item .t {
+    font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .wp-empty { grid-column: 1 / -1; font-size: 12px; color: var(--text-dim); text-align: center; padding: 20px 0; }
 
   .tabs { display: flex; gap: 6px; padding: 10px 16px 0; }
   .tab {
@@ -222,12 +256,12 @@
   <div class="toolbar">
     <template v-if="tab==='live'">
       <button class="tb blue" @click="openWinPicker">🪟 选择窗口</button>
-      <button class="tb green" @click="py('f6')">立即翻译<span class="k">F6</span></button>
+      <button class="tb green" @click="py('f6')">立即翻译</button>
       <button class="tb" @click="toggleOverlayText">{{ overlayHidden ? '👁 显示译文' : '🙈 隐藏译文' }}</button>
-      <button class="tb" @click="py('f9')">自动翻译: {{ paused ? '关' : '开' }}<span class="k">F9</span></button>
+      <button class="tb" @click="py('f9')">自动翻译: {{ paused ? '关' : '开' }}</button>
     </template>
     <template v-else-if="tab==='chat'">
-      <button class="tb purple" @click="py('f5')">截图直译<span class="k">F5</span></button>
+      <button class="tb purple" @click="py('f5')">截图直译</button>
     </template>
   </div>
 
@@ -247,7 +281,7 @@
     <!-- Tab 1: 实时翻译 -->
     <div v-show="tab==='live'" class="pane">
       <div class="list" ref="liveList">
-        <div v-if="!live.length" class="empty"><div class="big">🎮</div>按 F6/F7 翻译游戏画面<br>原文/译文对照记录在这里（从上往下读）</div>
+        <div v-if="!live.length" class="empty"><div class="big">🎮</div>「选择窗口」捕获游戏后点「立即翻译」<br>原文/译文对照记录在这里（从上往下读）</div>
         <div v-for="c in live" :key="c.id" class="card">
           <div class="card-head"><span class="card-title">翻译</span><span class="card-time">{{ c.time }}</span></div>
           <div class="orig">{{ c.original }}</div>
@@ -294,22 +328,36 @@
     <!-- Tab 3: 桌面歌词（窗口变形为宽扁横条贴屏幕底部） -->
     <div v-show="tab==='lyrics'" class="pane">
       <div class="lyrics-pane">
-        <div class="lyrics-text">
+        <div class="lyrics-text" :style="{fontSize: lyricFontSize + 'px'}">
           <template v-if="lyricText">{{ lyricText }}</template>
-          <span v-else class="hint">按 F6 翻译后对话主文本显示在这里（窗口可拖动）<br>右上角「☰ 展开」切回完整面板</span>
+          <span v-else class="hint">拖动横条盖住游戏对话行，翻译结果只取盖住区域<br>底部控制条调宽高 · 右上角「☰ 展开」切回</span>
         </div>
       </div>
     </div>
-    <button v-show="tab==='lyrics'" class="lyrics-exit" @click="tab='chat'">☰ 展开</button>
+    <template v-if="tab==='lyrics'">
+      <div class="lyrics-drag" style="-webkit-app-region: drag; app-region: drag;"></div>
+      <div class="lyrics-ctrl">
+        <button @click="adjustLyrics(-0.05, 0)" title="变窄">〔 宽</button>
+        <button @click="adjustLyrics(0.05, 0)" title="变宽">宽 〕</button>
+        <span class="sep"></span>
+        <button @click="adjustLyrics(0, -40)" title="变矮">︿ 高</button>
+        <button @click="adjustLyrics(0, 40)" title="变高">高 ﹀</button>
+        <span class="sep"></span>
+        <button @click="relocateLyrics()" title="拖动窗口后重新框定监控区域">🎯 重新框定</button>
+      </div>
+      <button class="lyrics-exit" @click="tab='chat'">☰ 展开</button>
+    </template>
 
-    <!-- 窗口选择器（点击选择要翻译的窗口，不依赖热键/前台） -->
+    <!-- 窗口选择器（Alt+Tab 式缩略图网格，点击捕获） -->
     <div v-if="winPicker" class="wp-mask" @click.self="winPicker = false">
       <div class="wp-modal">
         <h3>选择要翻译的窗口</h3>
         <div class="hint">点击游戏窗口开始捕获（本工具自身窗口已隐藏）</div>
-        <div class="wp-list">
+        <div class="wp-grid">
           <div v-for="w in winList" :key="w.hwnd" class="wp-item" :title="w.title" @click="pickWindow(w)">
-            {{ w.title }}<span class="pid">#{{ w.pid }}</span>
+            <img v-if="w.thumb" :src="w.thumb" alt="">
+            <div v-else class="no-thumb">🪟</div>
+            <div class="t">{{ w.title }}</div>
           </div>
           <div v-if="!winList.length" class="wp-empty">没找到可捕获的窗口</div>
         </div>
@@ -337,6 +385,7 @@ createApp({
     const overlayHidden = ref(false);
     const lyricText = ref("");
     const shape = ref("normal");
+    const lyricFontSize = ref(21);
 
     function py(name) { pywebview.api.action(name); }
     function toggleOverlayText() { pywebview.api.toggle_overlay_visible(); }
@@ -355,6 +404,20 @@ createApp({
     async function pickWindow(w) {
       winPicker.value = false;
       try { await pywebview.api.capture_window(w.hwnd); } catch (e) {}
+    }
+
+    // ---------- 歌词模式：宽高调节 / 重新框定 ----------
+    async function adjustLyrics(dw, dh) {
+      try {
+        const s = await pywebview.api.adjust_lyrics(dw, dh);
+        if (s && s.h) {
+          // 字号跟随窗口高度（170px≈21px 基准）
+          lyricFontSize.value = Math.max(13, Math.min(34, Math.round(s.h * 21 / 170)));
+        }
+      } catch (e) {}
+    }
+    function relocateLyrics() {
+      pywebview.api.sync_lyrics_region();
     }
     const chatList = ref(null);
     const liveList = ref(null);
@@ -392,7 +455,7 @@ createApp({
           if (data.overlay_hidden !== undefined) overlayHidden.value = data.overlay_hidden;
         }
         else if (kind === "lyrics") {
-          lyricText.value = data;
+          lyricText.value = data || "";
         }
         if (kind === "translation") {
           live.value.push({ id: ++uid, time: now(), original: data.original, translated: data.translated });
@@ -444,7 +507,8 @@ createApp({
     return { tab, live, chat, question, withImage, attachedImage,
              newLive, newChat, chatList, liveList, askInput, ask, askAbout,
              paused, modeLabel, overlayHidden, lyricText, py, toggleOverlayText,
-             winPicker, winList, openWinPicker, pickWindow };
+             winPicker, winList, openWinPicker, pickWindow, adjustLyrics, relocateLyrics,
+             lyricFontSize };
   },
 }).mount("#app");
 

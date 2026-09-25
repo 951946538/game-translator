@@ -25,7 +25,8 @@ DEFAULT_CONFIG = {
     "ocr_min_score": 0.6,         # OCR 置信度过滤：低于该分数的结果丢弃（过滤艺术字体噪声）
     "overlay_pad": 6,             # 覆盖块向四周扩大的像素数（盖住检测框外的字体边缘）
     "auto_translate": True,       # 自动翻译开关（F7 进入游戏窗口时自动置为 False，F9 切换）
-    "overlay_mode": "inplace",    # 译文显示：panel 独立面板 / inplace 覆盖原文位置（F11 切换）
+    "overlay_mode": "inplace",    # 译文显示：panel 独立面板 / inplace 覆盖原文位置
+    "lyrics_shape": {"w_ratio": 0.85, "h": 170},  # 歌词横条：宽（屏宽比例 0.4~0.95）/ 高（px 110~340）
     "llm": {                      # OpenAI 兼容接口（DeepSeek / GLM / 通义等均可）
         "base_url": "https://api.deepseek.com/v1",
         "api_key": "",
