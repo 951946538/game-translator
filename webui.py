@@ -247,12 +247,8 @@ class PyApi:
         self._app_provider()._set_panel_shape(str(shape))
         return True
 
-    def adjust_lyrics(self, dw_ratio=0.0, dh=0):
-        """歌词横条尺寸调整（宽按屏宽比例步进/高按像素），并重新框定监控区域"""
-        return self._app_provider()._adjust_lyrics(float(dw_ratio), int(dh))
-
     def sync_lyrics_region(self):
-        """歌词窗口拖动后手动重新框定（监控区域=歌词窗口当前覆盖的游戏区域）"""
+        """歌词窗口拖动/调整后手动重新框定（监控区域=歌词窗口当前覆盖的游戏区域）"""
         self._app_provider()._sync_lyrics_region()
         return True
 

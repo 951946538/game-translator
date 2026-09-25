@@ -334,7 +334,7 @@
       <div class="lyrics-pane">
         <div class="lyrics-text" :style="{fontSize: lyricFontSize + 'px'}">
           <template v-if="lyricText">{{ lyricText }}</template>
-          <span v-else class="hint">拖动横条盖住游戏对话行，翻译结果只取盖住区域<br>底部控制条调宽高 · 右上角「☰ 展开」切回</span>
+          <span v-else class="hint">拖动横条盖住游戏对话行，点「▶ 翻译」出歌词<br>拖动/拉伸窗口后自动跟随 · 右上角「☰ 展开」切回</span>
         </div>
       </div>
     </div>
@@ -342,14 +342,6 @@
       <div class="lyrics-drag" style="-webkit-app-region: drag; app-region: drag;"></div>
       <div class="lyrics-ctrl">
         <button class="lyrics-translate" @click="py('f6')" title="立即翻译歌词窗口盖住的区域">▶ 翻译</button>
-        <span class="sep"></span>
-        <button @click="adjustLyrics(-0.05, 0)" title="变窄">〔 宽</button>
-        <button @click="adjustLyrics(0.05, 0)" title="变宽">宽 〕</button>
-        <span class="sep"></span>
-        <button @click="adjustLyrics(0, -40)" title="变矮">︿ 高</button>
-        <button @click="adjustLyrics(0, 40)" title="变高">高 ﹀</button>
-        <span class="sep"></span>
-        <button @click="relocateLyrics()" title="拖动窗口后重新框定监控区域">🎯 重新框定</button>
       </div>
       <button class="lyrics-exit" @click="tab='chat'">☰ 展开</button>
     </template>
@@ -412,19 +404,11 @@ createApp({
       try { await pywebview.api.capture_window(w.hwnd); } catch (e) {}
     }
 
-    // ---------- 歌词模式：宽高调节 / 重新框定 ----------
-    async function adjustLyrics(dw, dh) {
-      try {
-        const s = await pywebview.api.adjust_lyrics(dw, dh);
-        if (s && s.h) {
-          // 字号跟随窗口高度（170px≈21px 基准）
-          lyricFontSize.value = Math.max(13, Math.min(34, Math.round(s.h * 21 / 170)));
-        }
-      } catch (e) {}
-    }
-    function relocateLyrics() {
-      pywebview.api.sync_lyrics_region();
-    }
+    // ---------- 歌词模式 ----------
+    // 字号跟随窗口高度（170px≈21px 基准），拖拽调整大小即时生效
+    window.addEventListener("resize", () => {
+      lyricFontSize.value = Math.max(13, Math.min(34, Math.round(window.innerHeight * 21 / 170)));
+    });
     const chatList = ref(null);
     const liveList = ref(null);
     const askInput = ref(null);
@@ -517,7 +501,7 @@ createApp({
     return { tab, live, chat, question, withImage, attachedImage,
              newLive, newChat, chatList, liveList, askInput, ask, askAbout,
              paused, modeLabel, overlayHidden, lyricText, py, toggleOverlayText,
-             winPicker, winList, openWinPicker, pickWindow, adjustLyrics, relocateLyrics,
+             winPicker, winList, openWinPicker, pickWindow,
              lyricFontSize };
   },
 }).mount("#app");

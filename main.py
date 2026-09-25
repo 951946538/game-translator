@@ -431,9 +431,7 @@ class App:
         region = (x1 - gx, y1 - gy, x2 - x1, y2 - y1)  # 客户区相对坐标
         self.live.clear()
         self.live.start(region, game_hwnd=self._game_hwnd)
-        # 歌词模式默认开启自动翻译（横条盖住对话行，来新对话自动出歌词）
-        if self.live.paused:
-            self.live.set_paused(False)
+        # 自动翻译遵循用户开关（默认关：点「▶ 翻译」手动触发；可用底部工具栏开关启用）
         self._push_state()
         return True
 
@@ -446,17 +444,22 @@ class App:
             self._push_state()
 
     def _sync_lyrics_region(self):
-        """歌词窗口移动/调整后重新框定（前端拖动结束/尺寸按钮触发）。"""
+        """歌词窗口移动/拖拽调整后重新框定监控区域（moved/resized 事件防抖触发）。"""
         if self.wm.panel_shape == "lyrics":
             self._apply_lyrics_region()
 
-    def _adjust_lyrics(self, dw_ratio=0.0, dh=0):
-        """调整歌词形态宽高并重新框定监控区域，尺寸存 config。"""
-        shape = self.wm.adjust_lyrics(dw_ratio, dh)
-        self.config.set(shape, "lyrics_shape")
-        self.config.save()
-        self._sync_lyrics_region()
-        return shape
+    def _on_panel_moved_or_resized(self, *args):
+        """歌词窗口拖动位置/拉伸尺寸：停止 600ms 后自动重新框定（过程中不反复触发），
+        用户无需手动「重新框定」。"""
+        if self.wm.panel_shape != "lyrics":
+            return
+        old = getattr(self, "_lyrics_resize_timer", None)
+        if old:
+            old.cancel()
+        t = threading.Timer(0.6, self._sync_lyrics_region)
+        t.daemon = True
+        t.start()
+        self._lyrics_resize_timer = t
 
     # ---------- 生命周期 ----------
 
@@ -520,6 +523,12 @@ def main():
     wins["panel"] = win_panel
 
     win_main.events.closed += app.on_close
+    # 歌词形态移动/拉伸 → 防抖后自动重新框定监控区域（无需手动操作）
+    win_panel.events.resized += app._on_panel_moved_or_resized
+    try:
+        win_panel.events.moved += app._on_panel_moved_or_resized
+    except Exception:
+        pass  # 旧版 pywebview 无 moved 事件
 
     def _on_main_shown():
         app.wm.main_hwnd = find_hwnd(TITLE_MAIN)

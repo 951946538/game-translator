@@ -280,15 +280,6 @@ class WindowManager:
             win.resize(w, h)
             win.move((sw - w) // 2, max(20, (sh - h) // 2))
 
-    def adjust_lyrics(self, dw_ratio=0.0, dh=0):
-        """调整歌词形态尺寸（宽按屏幕比例步进，高按像素档位），返回新尺寸。"""
-        shape = dict(self.lyrics_shape or {"w_ratio": 0.85, "h": 170})
-        shape["w_ratio"] = round(min(0.95, max(0.4, shape.get("w_ratio", 0.85) + dw_ratio)), 2)
-        shape["h"] = int(min(340, max(110, shape.get("h", 170) + dh)))
-        self.lyrics_shape = shape
-        self.position_panel()
-        return shape
-
     def panel_window_rect(self):
         """输出面板整窗的屏幕物理矩形（歌词模式监控区域同步用）"""
         hwnd = self.panel_hwnd
@@ -297,10 +288,17 @@ class WindowManager:
         return window_rect(hwnd)
 
     def set_panel_shape(self, shape):
-        """歌词 tab 驱动的形态切换：lyrics（宽扁横条）/ normal（常规面板）"""
+        """歌词 tab 驱动的形态切换：lyrics（宽扁横条）/ normal（常规面板）。
+        歌词形态开启边缘拖拽调整大小（拖完由 resized 事件自动重新框定监控区域）。"""
         if shape == self.panel_shape:
             return
         self.panel_shape = shape
+        win = self.get_win("panel")
+        try:
+            if win:
+                win.resizable = (shape == "lyrics")
+        except Exception:
+            pass
         self.position_panel()
         logging.info("输出面板形态: %s", shape)
 
